@@ -195,7 +195,7 @@
       <button data-overlay="on" id="overlayname">them</button>
     </div>
   </div>
-  <div class="ctl" id="zoomctl">Zoom <button type="button" id="zoomout" class="mini" title="Zoom out">&minus;</button> <button type="button" id="zoomin" class="mini" title="Zoom in">+</button></div>
+  <div class="ctl" id="zoomctl">Zoom <button type="button" id="zoomout" class="mini" title="Zoom out">&minus;</button> <button type="button" id="zoomin" class="mini" title="Zoom in">+</button> <button type="button" id="zoomfit" class="mini" title="Zoom out to the whole tree">whole</button> <button type="button" id="compact" class="mini" title="Condense the tree so all of it fits legibly">collapse</button></div>
   <label class="ctl" id="findctl" for="find">Find <input id="find" type="search" list="names" placeholder="artist" autocomplete="off" style="width:130px"></label>
   <datalist id="names"></datalist>
   <label class="ctl" id="nctl" for="n">Artists <input id="n" type="range" min="0" max="290" value="24"> <output id="nout">24</output></label>
@@ -396,7 +396,8 @@
   const hours = a => isExport ? `${Math.round(w(a))} h${state.year ? ' in ' + state.year : ''}` : `weight ${a.weight}`;
   // Label size follows the node: about the node's radius, never under 13px,
   // so a trunk's name is as tall as half its circle (Chris, 2026-10-10).
-  const fontOf = a => Math.max(13, Math.round(radius(a)));
+  const fontOf = a => Math.max(state.compact ? 8 : 13, Math.round(radius(a)));
+  const rowH = () => state.compact ? ROW * 0.55 : ROW, colW = () => state.compact ? COL * 0.6 : COL;
 
   // ---------- colour --------------------------------------------------------
   // Families take palette slots in order of hours, so a family keeps its
@@ -430,7 +431,7 @@
   // ---------- controls and state --------------------------------------------
   const VIEW_NAMES = ['mindmap', 'radial', 'bubbles', 'genres', 'river', 'duo', 'past', 'moments', 'diary', 'marquee', 'wrapped'];
   const state = { person: 0, view: 'mindmap', n: 24, age: 'desaturate', colour: 'genre', riverby: 'genre', riverFamily: null,
-                  sunRoot: null, text: 1, open: new Set(), selected: null, year: null, overlay: 'off', hover: null };
+                  sunRoot: null, text: 1, open: new Set(), selected: null, year: null, overlay: 'off', hover: null, compact: false };
   try { Object.assign(state, JSON.parse(localStorage.getItem('musictree-state') || '{}'), { open: new Set(), selected: null, riverFamily: null, sunRoot: null, year: null, hover: null }); } catch (e) {}
   if (VIEW_NAMES.includes(location.hash.slice(1))) state.view = location.hash.slice(1);
   if (!VIEW_NAMES.includes(state.view)) state.view = 'mindmap';
@@ -685,6 +686,10 @@
     e.preventDefault(); d3.select(canvas).call(zoom.translateBy, 0, -e.deltaY / transform.k);
   }, { passive: false });
   document.getElementById('zoomin').addEventListener('click', () => d3.select(canvas).transition().duration(200).call(zoom.scaleBy, 1.3));
+  document.getElementById('zoomfit').addEventListener('click', () => { if (scrolls()) fitWidth(); else fit(); });
+  // Compact: tighter rows and columns, smaller circles and type, song ladders
+  // closed, so the whole tree reads at once instead of as a fitted speck.
+  document.getElementById('compact').addEventListener('click', () => { state.compact = !state.compact; state.open.clear(); draw(); });
   document.getElementById('zoomout').addEventListener('click', () => d3.select(canvas).transition().duration(200).call(zoom.scaleBy, 1 / 1.3));
   window.addEventListener('resize', () => { size(); render(); });
 
@@ -814,7 +819,7 @@
         state.open.add(a.id);
       }
     } else state.selected = state.selected === a.id ? null : a.id;
-    draw();
+    draw(true);   // keep the zoom: refitting on every tap threw the reader across the tree (Chris, 2026-11-04)
   }
   const artistHit = a => a.unplaced ? null : { data: a, hover: e => showTip(e, a), click: () => tap(a) };
   const ring = a => (state.open.has(a.id) || state.selected === a.id) ? { stroke: T.fg, strokeWidth: 2 }
@@ -863,6 +868,7 @@
     const roots = hierarchyRoots(vis);
     // Split trunks between sides so the two columns end up about the same
     // height; height is node count plus open song rows, so balance on that.
+    const ROW = rowH(), COL = colW();   // shadow the constants: compact mode tightens the grid
     const rows = n => 1 + (state.open.has(n.a.id) ? songsShown(n.a) * SONG_ROW / ROW : 0) + n.children.reduce((s, c) => s + rows(c), 0);
     const sides = [{ roots: [], h: 0 }, { roots: [], h: 0 }];
     for (const r of roots) { const s = sides[0].h <= sides[1].h ? sides[0] : sides[1]; s.roots.push(r); s.h += rows(r); }
@@ -943,7 +949,7 @@
     // empty and every label is within 45° of level (Chris, 2026-11-04).
     const fold = t => t < Math.PI ? Math.PI / 4 + t / 2 : 5 * Math.PI / 4 + (t - Math.PI) / 2;
     root.each(d => { if (d.depth) d.x = fold(d.x); });
-    let gap = 160;
+    let gap = state.compact ? 90 : 160;
     for (const [depth, nodes] of d3.groups(root.descendants().filter(d => d.depth > 0), d => d.depth)) {
       const angles = nodes.map(d => d.x).sort(d3.ascending);
       let minGap = 2 * Math.PI;
@@ -953,7 +959,7 @@
       // room it needs across the ring is its circle, the label and the
       // neighbour's circle; a leaf's label runs along the spoke and needs
       // only its own height.
-      const pitch = Math.max(ROW * 1.15, d3.max(nodes, d => d.children ? 2 * radius(d.data.a) + fontOf(d.data.a) + 6 : 1.25 * fontOf(d.data.a)));
+      const pitch = Math.max(rowH() * 1.15, d3.max(nodes, d => d.children ? 2 * radius(d.data.a) + fontOf(d.data.a) + 6 : 1.25 * fontOf(d.data.a)));
       if (angles.length > 1) gap = Math.max(gap, pitch / (minGap * depth));
     }
     root.each(d => { d.y = d.depth * gap; });
@@ -1822,7 +1828,9 @@
   function draw(keep = false) {
     setHues(state.view === 'bubbles' || (state.view === 'river' && ['stacked', 'merged'].includes(state.riverby)) ? HUES_BUBBLES : HUES_TREE);
     const maxEff = d3.max(artists, w) || 1;
-    rScale.domain([0, maxEff]); strokeScale.domain([0, maxEff]);
+    rScale.domain([0, maxEff]).range(state.compact ? [2, 14] : [3, 26]); strokeScale.domain([0, maxEff]).range(state.compact ? [0.7, 3.5] : [1, 6]);
+    document.getElementById('compact').setAttribute('aria-pressed', String(state.compact));
+    document.getElementById('compact').textContent = state.compact ? 'expand' : 'collapse';
     scene.pos = null; state.hover = null;
     syncView(); syncAge(); syncColour(); syncRiver(); syncOverlay(); syncPerson(); showControls(); drawLegend(); remember();
     nout.textContent = state.n;
