@@ -1823,7 +1823,7 @@
     const maxEff = d3.max(artists, w) || 1;
     rScale.domain([0, maxEff]); strokeScale.domain([0, maxEff]);
     scene.pos = null; state.hover = null;
-    syncView(); syncAge(); syncColour(); syncRiver(); syncOverlay(); showControls(); drawLegend(); remember();
+    syncView(); syncAge(); syncColour(); syncRiver(); syncOverlay(); syncPerson(); showControls(); drawLegend(); remember();
     nout.textContent = state.n;
     scene.shapes = []; scene.labels = []; scene.bbox = null;
     VIEWS[state.view](visibleSet(state.n));
