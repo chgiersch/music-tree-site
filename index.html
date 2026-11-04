@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Music Tree Mixtape</title>
+<title>Mixtape: Music Tree</title>
 <!--
   Music Tree – the page. Reads site/tree.json (written by the pipeline) and
   draws Chris's listening as one of five views, switchable in the bar:
@@ -77,9 +77,15 @@
     font: 14px/1.45 -apple-system, "SF Pro Text", system-ui, sans-serif; }
   body { display: flex; flex-direction: column; }
 
-  #bar { flex: none; z-index: 2; background: var(--bg); border-bottom: 1px solid var(--line);
-    display: flex; flex-wrap: wrap; align-items: center; gap: 10px 20px; padding: 8px 16px; }
-  #bar h1 { font-size: 16px; font-weight: 600; margin: 0; }
+  /* Mobile first: the bar is two rows that scroll sideways, so the map keeps
+     the screen; from 700px up the rows wrap instead. The map's own controls
+     float in its corners (find, zoom, legend) rather than taking bar room. */
+  #bar { flex: none; z-index: 2; background: var(--bg); border-bottom: 1px solid var(--line); padding: 6px 12px 0; }
+  #bar .row { display: flex; align-items: center; gap: 8px 14px; overflow-x: auto; padding-bottom: 6px; scrollbar-width: none; }
+  #bar .row::-webkit-scrollbar { display: none; }
+  #bar h1 { font-size: 15px; font-weight: 600; margin: 0; white-space: nowrap; }
+  .ctl, .seg { flex: none; white-space: nowrap; }
+  @media (min-width: 700px) { #bar { padding: 8px 16px 2px; } #bar .row { flex-wrap: wrap; overflow: visible; gap: 8px 20px; } #bar h1 { font-size: 16px; } }
   .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
   .seg button { font: inherit; font-size: 13px; padding: 4px 10px; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
   .seg button + button { border-left: 1px solid var(--line); }
@@ -92,15 +98,33 @@
   .ctl.off { opacity: 0.4; }
   .ctl .mini { font: inherit; font-size: 11px; padding: 2px 7px; border: 1px solid var(--line); border-radius: 4px; background: transparent; color: var(--fg); cursor: pointer; }
   .ctl .mini[aria-pressed="true"] { background: var(--surface); }
-  .ctl input[type=search] { font: inherit; font-size: 13px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--fg); }
-  .legend { display: flex; gap: 12px; align-items: center; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
+  .ctl input[type=checkbox] { accent-color: var(--accent); margin: 0; }
+  .legend { display: flex; gap: 10px 12px; align-items: center; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
   .legend span { display: inline-flex; align-items: center; gap: 5px; }
   .legend i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
   .legend .ramp { width: 56px; height: 8px; border-radius: 4px; }
-  #note { font-size: 12px; color: var(--muted); margin-left: auto; }
+  #note { font-size: 11px; color: var(--muted); display: block; margin-top: 4px; }
 
   #stage { flex: 1; min-height: 0; display: flex; }
-  #map { flex: 1; min-width: 0; height: 100%; display: block; cursor: grab; touch-action: none; }
+  #mapwrap { flex: 1; min-width: 0; position: relative; }
+  #map { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+  /* The map's corners. Translucent so the drawing shows through. */
+  .float { position: absolute; z-index: 2; background: color-mix(in srgb, var(--bg) 82%, transparent); border-radius: 8px; padding: 5px 7px; }
+  #findctl { top: 8px; right: 8px; padding: 0; }
+  #findctl input { font: inherit; font-size: 14px; padding: 6px 10px; width: 120px; border: 1px solid var(--line); border-radius: 8px; background: color-mix(in srgb, var(--bg) 82%, transparent); color: var(--fg); }
+  #findctl input:focus { width: 180px; outline: 2px solid var(--accent); }
+  #zoomctl { bottom: 8px; right: 8px; display: flex; gap: 4px; }
+  #zoomctl .mini { font-size: 14px; padding: 5px 10px; border-radius: 6px; }
+  #corner { bottom: 8px; left: 8px; max-width: 70%; }
+  #legendbtn { display: none; }
+  @media (max-width: 699px) {
+    #corner .legend, #corner #note { display: none; }
+    #corner.open .legend { display: flex; margin-top: 6px; } #corner.open #note { display: block; }
+    #legendbtn { display: inline-block; }
+    #findctl input { width: 118px; } #findctl input:focus { width: 170px; }
+    /* The side panel becomes a bottom sheet. */
+    #panel { position: fixed; left: 0; right: 0; bottom: 0; width: auto; max-height: 55vh; border-left: 0; border-top: 1px solid var(--line); z-index: 4; }
+  }
   #map:active { cursor: grabbing; }
   #map.hit { cursor: pointer; }
 
@@ -142,7 +166,14 @@
   #tray { flex: none; z-index: 3; max-height: 46vh; overflow: auto;
     background: var(--surface); border-top: 1px solid var(--line); padding: 8px 14px 10px; font-size: 13px; }
   #tray .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 6px; }
-  #tray .mini { font: inherit; font-size: 12px; padding: 3px 9px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--fg); cursor: pointer; }
+  #bar h1 .mini { font-size: 12px; padding: 1px 7px; margin-left: 6px; vertical-align: middle; border-radius: 10px; }
+  #helpcard { position: fixed; z-index: 6; width: min(380px, 92vw); max-height: 70vh; overflow: auto; background: var(--surface); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; font-size: 13px; box-shadow: 0 8px 28px rgba(0,0,0,0.35); }
+  #helpcard h2 { font-size: 15px; margin: 0 0 6px; }
+  #helpcard h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 12px 0 4px; }
+  #helpcard p { margin: 0 0 6px; color: var(--muted); }
+  #helpcard b { color: var(--fg); }
+  #bar h1 .mini, #tray .mini { font: inherit; font-size: 12px; padding: 3px 9px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--fg); cursor: pointer; }
   #tray .chip { font: inherit; font-size: 12px; padding: 2px 9px; border: 1px solid var(--accent); border-radius: 12px; background: transparent; color: var(--fg); cursor: pointer; }
   #tray .chip:hover, #result li:hover b { text-decoration: line-through; }
   #tray label, #saver span { color: var(--muted); }
@@ -159,13 +190,16 @@
 </head>
 <body>
 <div id="bar">
-  <h1>Music Tree Mixtape</h1>
+  <div class="row">
+    <h1>Mixtape: Music Tree <button type="button" id="help" class="mini" title="How to use this" aria-expanded="false">i</button></h1>
+    <div id="helpcard" hidden></div>
   <div class="seg" id="views" role="group" aria-label="View">
     <button data-view="mindmap">Mind map</button>
     <button data-view="radial">Radial</button>
     <button data-view="bubbles">Bubbles</button>
     <button data-view="genres">Genres</button>
     <button data-view="river">River</button>
+    <button data-view="energy" title="Needs energy.json">Energy</button>
     <button data-view="duo" title="Needs compare.json">Two of us</button>
     <button data-view="past" title="Needs compare.json">Past</button>
     <button data-view="moments" title="Needs compare.json">Moments</button>
@@ -173,6 +207,8 @@
     <button data-view="marquee" title="Needs account.json">Marquee</button>
     <button data-view="wrapped" title="Needs account.json">Wrapped</button>
   </div>
+  </div>
+  <div class="row">
   <div class="ctl" id="personctl">Person
     <div class="seg" id="persons" role="group" aria-label="Whose tree">
       <button data-person="0">you</button>
@@ -195,30 +231,33 @@
       <button data-overlay="on" id="overlayname">them</button>
     </div>
   </div>
-  <div class="ctl" id="zoomctl">Zoom <button type="button" id="zoomout" class="mini" title="Zoom out">&minus;</button> <button type="button" id="zoomin" class="mini" title="Zoom in">+</button> <button type="button" id="zoomfit" class="mini" title="Zoom out to the whole tree">whole</button> <button type="button" id="compact" class="mini" title="Condense the tree so all of it fits legibly">collapse</button></div>
-  <label class="ctl" id="findctl" for="find">Find <input id="find" type="search" list="names" placeholder="artist" autocomplete="off" style="width:130px"></label>
-  <datalist id="names"></datalist>
   <label class="ctl" id="nctl" for="n">Artists <input id="n" type="range" min="0" max="290" value="24"> <output id="nout">24</output></label>
-  <label class="ctl" for="textsize">Text <input id="textsize" type="range" min="0.6" max="1.8" step="0.1" value="1" style="width:90px"></label>
-  <div class="ctl" id="agectl">Age
-    <div class="seg" id="ages" role="group" aria-label="Age encoding">
-      <button data-age="desaturate">grey</button>
-      <button data-age="opacity">transparent</button>
+  <div class="ctl" id="textctl">Text
+    <div class="seg" id="texts" role="group" aria-label="Text size">
+      <button data-text="s">S</button>
+      <button data-text="m">M</button>
+      <button data-text="l">L</button>
     </div>
   </div>
+  <label class="ctl" id="fadectl"><input type="checkbox" id="fade"> fade older</label>
   <div class="ctl" id="colourctl">Colour
     <div class="seg" id="colours" role="group" aria-label="Colour encoding">
       <button data-colour="genre">genre</button>
       <button data-colour="accent">one hue</button>
       <button data-colour="era">era</button>
       <button data-colour="sparkle" title="Cool hues: purple, blue, green">sparkle</button>
+      <button data-colour="chill" title="Chill to charged, measured from the audio">chill</button>
     </div>
   </div>
-  <div class="legend" id="legend"></div>
-  <span id="note"></span>
+  </div>
 </div>
 <div id="stage">
-  <canvas id="map"></canvas>
+  <div id="mapwrap">
+    <canvas id="map"></canvas>
+    <div id="findctl" class="float"><input id="find" type="search" list="names" placeholder="find artist" autocomplete="off" aria-label="Find an artist"><datalist id="names"></datalist></div>
+    <div id="zoomctl" class="float"><button type="button" id="zoomout" class="mini" title="Zoom out">&minus;</button><button type="button" id="zoomin" class="mini" title="Zoom in">+</button><button type="button" id="zoomfit" class="mini" title="Zoom out to the whole picture">whole</button><button type="button" id="compact" class="mini" title="Condense the tree so all of it fits legibly">collapse</button></div>
+    <div id="corner" class="float"><button type="button" id="legendbtn" class="mini">legend</button><div class="legend" id="legend"></div><span id="note"></span></div>
+  </div>
   <aside id="panel" hidden></aside>
 </div>
 <div id="tip"></div>
@@ -227,6 +266,7 @@
   <div class="row" id="dials">
     <div class="seg" id="who" role="group" aria-label="Whose songs"><button data-v="me">me</button><button data-v="them">them</button><button data-v="both">both</button></div>
     <div class="seg" id="pool" role="group" aria-label="Familiar or new"><button data-v="played">songs we play</button><button data-v="new">new to us</button><button data-v="mix">mix</button></div>
+    <div class="seg" id="chill" role="group" aria-label="Energy"><button data-v="mellow">mellow</button><button data-v="any">any energy</button><button data-v="up">up</button></div>
     <div class="seg" id="len" role="group" aria-label="Length"><button data-v="20">20</button><button data-v="30">30</button><button data-v="60">60</button></div>
     <label><input type="checkbox" id="yearonly"> only <span></span></label>
     <button type="button" id="buildbtn" class="mini">Build</button>
@@ -246,7 +286,7 @@
 <div id="msg" hidden></div>
 <div id="lock" hidden>
   <form>
-    <h1>Music Tree Mixtape</h1>
+    <h1>Mixtape: Music Tree</h1>
     <p>Two listening histories live behind this page. Type the passphrase once per device.</p>
     <input type="password" autocomplete="current-password" placeholder="passphrase" autofocus>
     <button type="submit">Unlock</button>
@@ -258,7 +298,7 @@
 <script>
 (async function () {
   // ---------- load ---------------------------------------------------------
-  let tree, tree2 = null, cmp = null, acct = null, picks = null, spotifyId = null;
+  let tree, tree2 = null, cmp = null, acct = null, picks = null, spotifyId = null, energy = null;
 
   // ----- encrypted data (the deployed copy) --------------------------------
   // Locally the pipeline writes plain tree.json next to this file. On GitHub
@@ -351,6 +391,8 @@
     try { acct = await load('account'); } catch (e) {}
     // picks.json is the recommender's candidate pool for the playlist tray (`picks`).
     try { picks = await load('picks'); } catch (e) {}
+    // energy.json scores every artist from chill to charged (`energy`).
+    try { energy = await load('energy'); } catch (e) {}
     // spotify.json holds the app's client id (public by design) for the
     // Save button's login; `deploy` writes it. Missing means no Save.
     try { const r = await fetch('spotify.json', { cache: 'no-cache' }); if (r.ok) spotifyId = (await r.json()).client_id; } catch (e) {}
@@ -397,6 +439,12 @@
   // Label size follows the node: about the node's radius, never under 13px,
   // so a trunk's name is as tall as half its circle (Chris, 2026-10-10).
   const fontOf = a => Math.max(state.compact ? 8 : 13, Math.round(radius(a)));
+  // 0 is the chillest artist measured, 1 the most charged, null if Deezer
+  // had no preview (see pipeline/musictree/energy.py). Keyed by name, so it
+  // serves both trees.
+  const charge = a => energy?.artists?.[a.name]?.charge ?? null;
+  const CHILL_STOPS = ['#4f8dff', '#52d3c4', '#f2d14a', '#ff7a3d', '#ff3b5c'];
+  const chillRamp = d3.interpolateRgbBasis(CHILL_STOPS);
   const rowH = () => state.compact ? ROW * 0.55 : ROW, colW = () => state.compact ? COL * 0.6 : COL;
 
   // ---------- colour --------------------------------------------------------
@@ -421,29 +469,45 @@
     if (a.unplaced) return { fill: 'none', opacity: 1 };
     const r = recency(a);
     if (state.colour === 'era') return { fill: d3.interpolateLab(d3.interpolateLab(T.bg, T.accent)(0.3), T.accent)(r), opacity: 1 };
+    // Chill colour encodes the audio measurement, not age; unmeasured artists go grey.
+    if (state.colour === 'chill') { const c = charge(a); return { fill: c === null ? T.grey : chillRamp(c), opacity: 1 }; }
     const hue = state.colour === 'accent' ? T.accent : famColor.get(a.family);
-    if (state.age === 'opacity') return { fill: hue || T.other, opacity: 0.15 + 0.85 * r };
+    if (state.age === 'none') return { fill: hue || T.other, opacity: 1 };    // fade off: full colour whatever the age
     return hue
       ? { fill: d3.interpolateLab(T.grey, hue)(0.2 + 0.8 * r), opacity: 1 }
       : { fill: d3.interpolateLab(T.bg, T.other)(0.35 + 0.65 * r), opacity: 1 };
   }
 
   // ---------- controls and state --------------------------------------------
-  const VIEW_NAMES = ['mindmap', 'radial', 'bubbles', 'genres', 'river', 'duo', 'past', 'moments', 'diary', 'marquee', 'wrapped'];
+  const VIEW_NAMES = ['mindmap', 'radial', 'bubbles', 'genres', 'river', 'energy', 'duo', 'past', 'moments', 'diary', 'marquee', 'wrapped'];
   const state = { person: 0, view: 'mindmap', n: 24, age: 'desaturate', colour: 'genre', riverby: 'genre', riverFamily: null,
                   sunRoot: null, text: 1, open: new Set(), selected: null, year: null, overlay: 'off', hover: null, compact: false };
   try { Object.assign(state, JSON.parse(localStorage.getItem('musictree-state') || '{}'), { open: new Set(), selected: null, riverFamily: null, sunRoot: null, year: null, hover: null }); } catch (e) {}
   if (VIEW_NAMES.includes(location.hash.slice(1))) state.view = location.hash.slice(1);
   if (!VIEW_NAMES.includes(state.view)) state.view = 'mindmap';
   function remember() {
-    try { localStorage.setItem('musictree-state', JSON.stringify({ person: state.person, view: state.view, n: state.n, age: state.age, colour: state.colour, riverby: state.riverby, text: state.text, overlay: state.overlay })); } catch (e) {}
+    try { localStorage.setItem('musictree-state', JSON.stringify({ person: state.person, view: state.view, n: state.n, age: state.age, colour: state.colour, riverby: state.riverby, textBy: state.textBy, overlay: state.overlay })); } catch (e) {}
   }
 
   const slider = document.getElementById('n'), nout = document.getElementById('nout');
   slider.addEventListener('input', () => { state.n = +slider.value; draw(); });
-  const textSlider = document.getElementById('textsize');
-  textSlider.value = state.text;
-  textSlider.addEventListener('input', () => { state.text = +textSlider.value; remember(); render(); });
+  // Text size: three settings, remembered per view, each tuned so labels
+  // space well in that view (a slider's middle range was noise; Chris,
+  // 2026-11-04). The factor multiplies every label's designed size.
+  const TEXT_SIZES = { mindmap: [0.8, 1, 1.35], radial: [0.8, 1, 1.35], bubbles: [0.85, 1, 1.3], genres: [0.8, 1, 1.3], river: [0.9, 1.15, 1.5], energy: [0.85, 1, 1.3],
+                       duo: [1, 1.2, 1.5], past: [1, 1.25, 1.6], moments: [1, 1.2, 1.5], diary: [1, 1.2, 1.5], marquee: [1, 1.2, 1.5], wrapped: [1, 1.2, 1.5] };
+  const TEXT_KEYS = ['s', 'm', 'l'];
+  if (typeof state.textBy !== 'object' || !state.textBy) state.textBy = {};
+  const textFactor = () => (TEXT_SIZES[state.view] || TEXT_SIZES.mindmap)[TEXT_KEYS.indexOf(state.textBy[state.view] || 'm')];
+  document.querySelectorAll('#texts button').forEach(b => b.addEventListener('click', () => { state.textBy[state.view] = b.dataset.text; remember(); syncText(); render(); }));
+  const syncText = () => document.querySelectorAll('#texts button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.text === (state.textBy[state.view] || 'm'))));
+  // Fade older: one checkbox. The old two-way toggle (grey / transparent)
+  // was the same idea twice; a stored 'opacity' means fade on.
+  const fadeBox = document.getElementById('fade');
+  if (state.age === 'opacity') state.age = 'desaturate';
+  fadeBox.addEventListener('change', () => { state.age = fadeBox.checked ? 'desaturate' : 'none'; draw(); });
+  const syncFade = () => { fadeBox.checked = state.age !== 'none'; };
+  document.getElementById('legendbtn').addEventListener('click', () => document.getElementById('corner').classList.toggle('open'));
 
   function segment(id, attr, key) {
     const el = document.getElementById(id);
@@ -457,7 +521,6 @@
     return () => el.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset[attr] === String(state[key]))));
   }
   const syncView = segment('views', 'view', 'view');
-  const syncAge = segment('ages', 'age', 'age');
   const syncColour = segment('colours', 'colour', 'colour');
   const syncRiver = segment('riverby', 'riverby', 'riverby');
   const syncOverlay = segment('overlays', 'overlay', 'overlay');
@@ -500,19 +563,31 @@
   // Which controls mean something in which view. A control that cannot
   // change what is on screen is hidden, not greyed (Chris, 2026-11-04).
   const RELEVANT = {
-    nctl: ['mindmap', 'radial', 'bubbles', 'genres', 'river', 'duo'],
-    agectl: ['mindmap', 'radial', 'bubbles', 'genres', 'river'],
-    colourctl: ['mindmap', 'radial', 'bubbles', 'genres', 'river', 'duo', 'diary', 'marquee'],
+    nctl: ['mindmap', 'radial', 'bubbles', 'genres', 'energy', 'duo'],      // plus river by artist
+    fadectl: ['mindmap', 'radial', 'bubbles', 'genres', 'energy'],         // plus river by artist; off when colour is era or chill
+    textctl: VIEW_NAMES,
+    colourctl: ['mindmap', 'radial', 'bubbles', 'genres', 'river', 'energy', 'duo', 'diary', 'marquee'],
     riverctl: ['river'],
     yearctl: ['mindmap', 'radial', 'bubbles', 'genres'],
     overlayctl: ['mindmap', 'radial', 'bubbles'],
-    personctl: ['mindmap', 'radial', 'bubbles', 'genres', 'river'],
+    personctl: ['mindmap', 'radial', 'bubbles', 'genres'],               // plus river by genre or artist
     zoomctl: VIEW_NAMES,
-    findctl: ['mindmap', 'radial', 'bubbles', 'genres'],
-    legend: ['mindmap', 'radial', 'bubbles', 'genres', 'river', 'duo', 'diary', 'marquee'],
+    findctl: ['mindmap', 'radial', 'bubbles', 'genres', 'energy'],
+    legend: ['mindmap', 'radial', 'bubbles', 'genres', 'river', 'energy', 'duo', 'diary', 'marquee'],
   };
+  // Audited 2026-11-04: a control shows only where it changes the drawing.
   function showControls() {
-    for (const [id, views] of Object.entries(RELEVANT)) document.getElementById(id).hidden = !views.includes(state.view) || (['overlayctl', 'personctl'].includes(id) && trees.length < 2);
+    const riverArtist = state.view === 'river' && state.riverby === 'artist';
+    const riverOne = state.view === 'river' && ['genre', 'artist'].includes(state.riverby);
+    for (const [id, views] of Object.entries(RELEVANT)) {
+      let on = views.includes(state.view);
+      if (id === 'nctl' || id === 'fadectl') on = on || riverArtist;
+      if (id === 'personctl') on = on || riverOne;
+      if (['overlayctl', 'personctl'].includes(id) && trees.length < 2) on = false;
+      if (id === 'fadectl' && ['era', 'chill'].includes(state.colour)) on = false;
+      document.getElementById(id).hidden = !on;
+    }
+    document.getElementById('compact').hidden = !['mindmap', 'radial'].includes(state.view);
     if (!state.year) stopPlay();
   }
   // Two trees unlock the person picker, the overlay and the two-person
@@ -520,6 +595,8 @@
   if (trees.length > 1) { people.forEach((n, i) => { document.querySelector(`[data-person="${i}"]`).textContent = n; }); if (state.riverby === 'both') state.riverby = 'stacked'; }
   else { state.person = 0; state.overlay = 'off'; document.querySelectorAll('[data-riverby=stacked],[data-riverby=merged]').forEach(b => { b.disabled = true; }); if (['both', 'stacked', 'merged'].includes(state.riverby)) state.riverby = 'genre'; }
   if (!isExport) document.querySelector('[data-view=river]').disabled = true;  // needs hours per year
+  if (!energy) { document.querySelector('[data-view=energy]').disabled = true; document.querySelector('[data-colour=chill]').disabled = true;
+    if (state.view === 'energy') state.view = 'mindmap'; if (state.colour === 'chill') state.colour = 'genre'; }
   if (!cmp) { document.querySelectorAll('[data-view=duo],[data-view=past],[data-view=moments]').forEach(b => { b.disabled = true; }); if (['duo', 'past', 'moments'].includes(state.view)) state.view = 'mindmap'; }
   if (!acct) { document.querySelectorAll('[data-view=diary],[data-view=marquee],[data-view=wrapped]').forEach(b => { b.disabled = true; }); if (['diary', 'marquee', 'wrapped'].includes(state.view)) state.view = 'mindmap'; }
 
@@ -532,10 +609,16 @@
       legend.append('span').html(`<i style="background:${T.other}"></i>other`);
     }
     if (state.view === 'river' && state.riverby === 'merged' && trees.length > 1) legend.append('span').html(`<i style="background:none;border:1.5px solid ${T.fg}"></i>both play it`);
-    const from = state.colour === 'era' ? d3.interpolateLab(T.bg, T.accent)(0.3) : state.age === 'opacity' ? T.bg : T.grey;
-    legend.append('span').html(`<span class="ramp" style="background:linear-gradient(90deg,${from},${T.accent})"></span>older → recent`);
+    if (state.colour === 'chill') {
+      legend.append('span').html(`<span class="ramp" style="background:linear-gradient(90deg,${CHILL_STOPS.join(',')})"></span>chill → charged`);
+      legend.append('span').html(`<i style="background:${T.grey}"></i>no preview to measure`);
+    } else {
+      if (state.colour === 'era' || state.age !== 'none') {
+        const from = state.colour === 'era' ? d3.interpolateLab(T.bg, T.accent)(0.3) : T.grey;
+        legend.append('span').html(`<span class="ramp" style="background:linear-gradient(90deg,${from},${T.accent})"></span>older → recent`);
+      }
+    }
     if (state.overlay === 'on' && other() && RELEVANT.overlayctl.includes(state.view)) legend.append('span').html(`<i style="background:none;border:2px solid ${OTHER}"></i>${other().person}'s hours`);
-    document.getElementById('agectl').classList.toggle('off', state.colour === 'era');
   }
   // Point every per-person lookup at one tree. Called once at start and
   // again from the person picker; the year scrubber resets because the
@@ -734,7 +817,7 @@
     // thing to paint and nobody reads labels while the view is moving.
     const halo = !zooming;
     for (const l of scene.labels) {
-      let fs = l.base * state.text / shrink;
+      let fs = l.base * textFactor() / shrink;
       if (l.fitw) fs = Math.min(fs, (l.fitw - 2) / (GLYPH * l.len));
       if (l.fith) fs = Math.min(fs, l.fith / (1.1 * l.lines.length));
       if (fs * k < 0.8) continue;                       // under a pixel on screen: nothing to see
@@ -1213,6 +1296,59 @@
     }
   }
 
+  // ========== view: energy ================================================
+  // One strip per person: artists as circles from chill (left) to charged
+  // (right), sized by hours, packed by a collision force so nothing
+  // overlaps; a dashed bar marks the person's hours-weighted centre. Below,
+  // that centre by year, one line per person, to see whether anyone is
+  // mellowing. Scores come from energy.json (pipeline/musictree/energy.py).
+  function energyView(vis) {
+    const W = 1200, LEFT = 60, RIGHT = W - 40, STRIP = 190, GAPY = 34;
+    const x = d3.scaleLinear().domain([0, 1]).range([LEFT, RIGHT]);
+    const n = Math.max(10, state.n + TRUNK_COUNT);
+    const pos = new Map();
+    let top = 30;
+    trees.forEach(t => {
+      const pool = (t === tree ? artists.filter(a => vis.has(a.id)) : t.artists.slice(0, n)).filter(a => charge(a) !== null);
+      const r = d3.scaleSqrt().domain([0, d3.max(pool, a => a.weight) || 1]).range([3, 22]);
+      const nodes = pool.map(a => ({ a, x: x(charge(a)), y: top + STRIP / 2 + (Math.random() - 0.5) * 20, r: r(a.weight) }));
+      const sim = d3.forceSimulation(nodes).force('x', d3.forceX(d => x(charge(d.a))).strength(1))
+        .force('y', d3.forceY(top + STRIP / 2).strength(0.08)).force('c', d3.forceCollide(d => d.r + 1.5)).stop();
+      for (let i = 0; i < 160; i++) sim.tick();
+      const centre = d3.sum(pool, a => a.weight * charge(a)) / (d3.sum(pool, a => a.weight) || 1);
+      addLabel({ x: LEFT, y: top - 12, text: `${t.person} · ${pool.length} artists · centre ${centre.toFixed(2)}`, base: 12, weight: 600, align: 'left' });
+      addLine(x(centre), top, x(centre), top + STRIP, { stroke: T.fg, strokeWidth: 1.5, dash: [4, 3] });
+      for (const d of nodes) {
+        const p = paint(d.a), m = energy.artists[d.a.name];
+        pos.set(d.a.id, [d.x, d.y]);
+        addCircle(d.x, d.y, d.r, { fill: p.fill, fillOpacity: p.opacity, ...ring(d.a), aid: d.a.id,
+          hit: { data: d.a, hover: e => tipAt(e, `<b>${d.a.name}</b><br>${d.a.family}<br>${t.person} ${Math.round(d.a.weight)} h<br>charge ${charge(d.a).toFixed(2)} · ${m.hits} hits/s · ${m.bright} Hz bright`), click: () => tap(d.a) } });
+        if (d.r >= 9) addLabel({ x: d.x, y: d.y, lines: wrapName(d.a.name), base: Math.max(8, Math.round(d.r / 2)), fitw: d.r * 1.9, fith: d.r * 1.8, aid: d.a.id });
+      }
+      addLine(LEFT, top + STRIP + 4, RIGHT, top + STRIP + 4, { stroke: T.line });
+      addLabel({ x: LEFT, y: top + STRIP + 15, text: 'chill', base: 11, color: T.muted, align: 'left' });
+      addLabel({ x: RIGHT, y: top + STRIP + 15, text: 'charged', base: 11, color: T.muted, align: 'right' });
+      top += STRIP + GAPY;
+    });
+    // Centre by year: hours-weighted mean charge over the measured artists.
+    const years = [...new Set(trees.flatMap(t => t.years))].sort();
+    const H = 160, y0 = top + 24;
+    const xy = d3.scaleLinear().domain([+years[0], +years[years.length - 1]]).range([LEFT, RIGHT]);
+    const yy = d3.scaleLinear().domain([0, 1]).range([y0 + H, y0]);
+    addLine(LEFT, yy(0), RIGHT, yy(0), { stroke: T.line }); addLine(LEFT, yy(0), LEFT, yy(1), { stroke: T.line });
+    for (const tk of [0, 0.25, 0.5, 0.75, 1]) { addLine(LEFT - 4, yy(tk), LEFT, yy(tk), { stroke: T.line }); addLabel({ x: LEFT - 7, y: yy(tk), text: tk === 0 ? 'chill' : tk === 1 ? 'charged' : String(tk), base: 10, color: T.muted, align: 'right' }); }
+    for (const yr of years) addLabel({ x: xy(+yr), y: yy(0) + 12, text: yr, base: 11, color: T.muted });
+    trees.forEach((t, ti) => {
+      const colour = ti ? OTHER : T.accent;
+      const pts = years.map(yr => { let hw = 0, h = 0; for (const a of t.artists) { const c = charge(a), hy = a.years?.[yr] || 0; if (c !== null && hy) { hw += hy * c; h += hy; } } return h >= 5 ? [xy(+yr), yy(hw / h)] : null; }).filter(Boolean);
+      if (pts.length > 1) addPath(d3.line().curve(d3.curveMonotoneX)(pts), { stroke: colour, strokeWidth: 2.5, bbox: [LEFT, y0, RIGHT, y0 + H] });
+      pts.forEach(pt => addCircle(pt[0], pt[1], 3, { fill: colour }));
+      if (pts.length) addLabel({ x: pts[pts.length - 1][0] + 8, y: pts[pts.length - 1][1], text: t.person, base: 11, weight: 600, color: colour, align: 'left' });
+    });
+    addLabel({ x: LEFT, y: y0 - 10, text: 'centre by year, weighted by hours (years with 5 h or more measured)', base: 11, color: T.muted, align: 'left' });
+    scene.pos = pos;
+  }
+
   // ========== two-person views (need compare.json) ========================
   // Families for the second person's artists come from compare.json, so
   // colour works the same way; hours are the person's own.
@@ -1611,7 +1747,7 @@
   const tray = document.getElementById('tray'), trayMsg = document.getElementById('traymsg');
   const seeds = [];                 // {kind, key, name, a?, uri?}
   const seedIds = new Set();        // artist ids among the seeds, for the ring
-  const build = { who: 'me', pool: 'played', len: '30', list: [] };
+  const build = { who: 'me', pool: 'played', len: '30', chill: 'any', list: [] };
   const ME = () => tree.person || 'me', THEM = () => other()?.person || null;
   function addSeed(s) {
     if (seeds.some(x => x.key === s.key)) { trayMsg.textContent = `${s.name} is already a seed`; return; }
@@ -1627,7 +1763,7 @@
   const dial = (id, key) => { const el = document.getElementById(id);
     el.querySelectorAll('button').forEach(b => b.addEventListener('click', () => { build[key] = b.dataset.v; syncTray(); }));
     return () => el.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === build[key]))); };
-  const syncWho = dial('who', 'who'), syncPool = dial('pool', 'pool'), syncLen = dial('len', 'len');
+  const syncWho = dial('who', 'who'), syncPool = dial('pool', 'pool'), syncLen = dial('len', 'len'), syncChill = dial('chill', 'chill');
   const yearOnly = document.getElementById('yearonly');
   function syncTray() {
     const empty = !seeds.length && !build.list.length;
@@ -1637,8 +1773,9 @@
     document.getElementById('who').hidden = !other();
     document.querySelector('#who [data-v=me]').textContent = ME(); document.querySelector('#who [data-v=them]').textContent = THEM() || 'them';
     document.getElementById('pool').hidden = !picks;
+    document.getElementById('chill').hidden = !energy;
     yearOnly.parentElement.hidden = !state.year; yearOnly.nextElementSibling.textContent = state.year || '';
-    syncWho(); syncPool(); syncLen(); saveTray();
+    syncWho(); syncPool(); syncLen(); syncChill(); saveTray();
     d3.select('#result').selectAll('li').data(build.list, t => t.uri).join('li').attr('title', 'remove')
       .html(t => `<b>${t.name}</b> <span>${t.artist}</span><small>${t.reason}</small>`)
       .on('click', (e, t) => { build.list = build.list.filter(x => x.uri !== t.uri); syncTray(); });
@@ -1738,22 +1875,43 @@
     } catch (e) { trayMsg.textContent = 'Spotify: ' + e.message; }
   }
   document.getElementById('save').addEventListener('click', openSaver);
-  document.getElementById('saveadd').addEventListener('click', () => saveTo(false));
-  document.getElementById('savereplace').addEventListener('click', () => saveTo(true));
-  document.getElementById('splogout').addEventListener('click', () => { localStorage.removeItem(SP_TOKEN); saver.hidden = true; trayMsg.textContent = 'Spotify login forgotten on this device'; });
+  // The help popover: the page's instructions, anchored under the i.
+  // Fixed-positioned from the button's rectangle, because the bar's rows
+  // scroll sideways and would clip an absolutely positioned child.
+  const helpBtn = document.getElementById('help'), helpCard = document.getElementById('helpcard');
+  helpCard.innerHTML = `<h2>How to use this</h2>
+    <h3>Looking</h3>
+    <p>Each view is one person's listening (the Person picker) or both. Circles are hours, colour is genre unless you change it, faded means long ago. Hover an artist to see who it goes with; tap it for its songs. Drag to pan, pinch or wheel to zoom, <b>whole</b> to see everything, <b>collapse</b> to condense the tree.</p>
+    <h3>Making a playlist</h3>
+    <p>1. Seed it: tap a song in an open artist's ladder, the <b>+</b> beside an artist, or a genre chip in the legend. Mix them. Seeds show as chips at the bottom; tap a chip to drop it.</p>
+    <p>2. Set the dials: whose songs, songs you play or new to you, mellow or up, how many.</p>
+    <p>3. <b>Build</b>. The list grows outward from the seeds. Tap a row to drop it; Build again to refill.</p>
+    <p>4. <b>Copy links</b> to paste into a playlist in the Spotify desktop app, or <b>Save to Spotify</b>: sign in once, press Save again, pick one of your own playlists, Add or Replace. Spotify won't let the page create a playlist, so keep an empty one as an inbox.</p>
+    <h3>Views</h3>
+    <p>Mind map, Radial, Bubbles, Genres: one person's tree four ways. River: hours by genre over the years; stacked and merged show both people. Energy: chill to charged, measured from the sound. Two of us, Past, Moments: the two histories against each other. Diary, Marquee, Wrapped: Spotify's own records.</p>`;
+  function toggleHelp(open = helpCard.hidden) {
+    helpCard.hidden = !open; helpBtn.setAttribute('aria-expanded', String(open));
+    if (!open) return;
+    const r = helpBtn.getBoundingClientRect();
+    helpCard.style.top = (r.bottom + 8) + 'px';
+    helpCard.style.left = Math.max(8, Math.min(r.left, window.innerWidth - helpCard.offsetWidth - 8)) + 'px';
+  }
+  helpBtn.addEventListener('click', e => { e.stopPropagation(); toggleHelp(); });
+  document.addEventListener('click', e => { if (!helpCard.hidden && !helpCard.contains(e.target)) toggleHelp(false); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && !helpCard.hidden) toggleHelp(false); });
 
   // The tray survives a reload (and the sign-in round trip): seeds by
   // artist id, the built list whole. Seeds from the other person's tree
   // are dropped on restore, since ids are per tree.
   const TRAY_KEY = 'musictree-tray';
   function saveTray() {
-    try { localStorage.setItem(TRAY_KEY, JSON.stringify({ seeds: seeds.map(s => ({ kind: s.kind, key: s.key, name: s.name, aid: s.a?.id, uri: s.uri })), list: build.list, who: build.who, pool: build.pool, len: build.len })); } catch (e) {}
+    try { localStorage.setItem(TRAY_KEY, JSON.stringify({ seeds: seeds.map(s => ({ kind: s.kind, key: s.key, name: s.name, aid: s.a?.id, uri: s.uri })), list: build.list, who: build.who, pool: build.pool, len: build.len, chill: build.chill })); } catch (e) {}
   }
   function restoreTray() {
     let t; try { t = JSON.parse(localStorage.getItem(TRAY_KEY) || 'null'); } catch (e) {}
     if (!t) return;
     for (const s of t.seeds || []) { const a = s.aid ? byId.get(s.aid) : null; if (s.aid && !a) continue; seeds.push({ ...s, a }); if (a) seedIds.add(a.id); }
-    build.list = t.list || []; build.who = t.who || build.who; build.pool = t.pool || build.pool; build.len = t.len || build.len;
+    build.list = t.list || []; build.who = t.who || build.who; build.pool = t.pool || build.pool; build.len = t.len || build.len; build.chill = t.chill || build.chill;
   }
 
   // Closeness of every tree artist to the seeds: 1 for a seed, 0.6 one
@@ -1786,12 +1944,16 @@
       taken.add(track.uri); out.push({ name: track.name, artist, uri: track.uri, reason }); return true;
     };
     const me = ME(), them = THEM();
+    // The chill dial: mellow keeps the calmer 40%, up the busier 40%, by the
+    // audio score; artists without a score only pass on "any".
+    const chillOk = name => { if (build.chill === 'any' || !energy) return true; const c = energy.artists[name]?.charge; return c != null && (build.chill === 'mellow' ? c <= 0.4 : c >= 0.6); };
     for (const s of seeds) if (s.kind === 'song') push({ name: s.name, uri: s.uri }, s.a.name, 'you picked it');
     // One source per generator; each yields the next song by the next
     // artist in closeness order, several passes deep, so the list is
     // round-robin across sources and no artist can fill it alone.
     function* played(person) {
       for (let pass = 0; pass < 3; pass++) for (const a of rankedA) {
+        if (!chillOk(a.name)) continue;
         if (person === me) { const s = a.songs[pass]; if (s) yield [s, a.name, `${why.get(a.id)} · ${me} plays ${a.name} ${Math.round(a.weight)} h`]; }
         else { const o = otherIndex().get(a.name), s = o?.weight >= 1 ? o.songs?.[pass] : null; if (s) yield [s, a.name, `${why.get(a.id)} · ${them} plays ${a.name} ${Math.round(o.weight)} h`]; }
       }
@@ -1803,7 +1965,7 @@
       // A pick scores by how close its anchors are to the seeds; the pool's
       // own order only breaks ties.
       const scored = pool.map((p, i) => ({ p, s: d3.sum(p.via, v => nameScore.get(v) || 0) + (genres.has(p.family) ? 0.5 : 0) - 0.1 * i / pool.length }))
-        .filter(x => x.s > 0).sort((x, y) => y.s - x.s);
+        .filter(x => x.s > 0 && chillOk(x.p.artist)).sort((x, y) => y.s - x.s);
       for (let pass = 0; pass < 2; pass++) for (const { p } of scored) {
         const t = p.tracks[pass]; if (!t) continue;
         const near = p.via.filter(v => nameScore.has(v)).slice(0, 2).join(', ') || p.via[0];
@@ -1824,7 +1986,9 @@
   }
 
   // ---------- draw ----------------------------------------------------------
-  const VIEWS = { mindmap, radial, bubbles, genres, river, duo, past, moments, diary, marquee, wrapped };
+  const VIEWS = { mindmap, radial, bubbles, genres, river, energy: energyView, duo, past, moments, diary, marquee, wrapped };
+  // An artist by id from whichever tree holds it; the energy view shows both.
+  const anyArtist = id => byId.get(id) || trees.map(t => t.artists.find(a => a.id === id)).find(Boolean);
   function draw(keep = false) {
     setHues(state.view === 'bubbles' || (state.view === 'river' && ['stacked', 'merged'].includes(state.riverby)) ? HUES_BUBBLES : HUES_TREE);
     const maxEff = d3.max(artists, w) || 1;
@@ -1832,11 +1996,11 @@
     document.getElementById('compact').setAttribute('aria-pressed', String(state.compact));
     document.getElementById('compact').textContent = state.compact ? 'expand' : 'collapse';
     scene.pos = null; state.hover = null;
-    syncView(); syncAge(); syncColour(); syncRiver(); syncOverlay(); syncPerson(); showControls(); drawLegend(); remember();
+    syncView(); syncFade(); syncText(); syncColour(); syncRiver(); syncOverlay(); syncPerson(); showControls(); drawLegend(); remember();
     nout.textContent = state.n;
     scene.shapes = []; scene.labels = []; scene.bbox = null;
     VIEWS[state.view](visibleSet(state.n));
-    showPanel(state.view !== 'mindmap' && state.selected ? byId.get(state.selected) : null);
+    showPanel(state.view !== 'mindmap' && state.selected ? anyArtist(state.selected) : null);
     syncTray();
     size();
     if (keep) render(); else if (scrolls()) fitWidth(); else fit();
