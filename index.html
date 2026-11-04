@@ -1371,7 +1371,7 @@
       const x0 = (i % COLS) * (CW + GAP), y0 = Math.floor(i / COLS) * (CH + GAP);
       const hA = v.hours[A] || 0, hB = v.hours[B] || 0, share = hA / ((hA + hB) || 1);
       addRect(x0, y0, CW, CH, { fill: T.surface, stroke: T.line, hit: { data: v.key,
-        hover: e => tipAt(e, `<b>${v.name}</b><br>${v.artists.length} artists · ${v.who === 'both' ? 'both of you' : v.who}<br>tap to seed a playlist`), click: () => applyVibe(v) } });
+        hover: e => tipAt(e, `<b>${v.name}</b><br>${v.artists.length} artists · ${v.who === 'both' ? 'both of you' : v.who} · ${v.tags.slice(0, 3).join(', ')}<br>tap to seed a playlist`), click: () => applyVibe(v) } });
       addLabel({ x: x0 + PAD, y: y0 + 18, text: v.name, base: 15, weight: 700, align: 'left', fitw: CW - 2 * PAD });
       addLabel({ x: x0 + CW - PAD, y: y0 + 18, text: v.band, base: 11, color: T.muted, align: 'right' });
       // Who-bar.
@@ -1387,7 +1387,7 @@
         addCircle(sx(a.charge), y0 + 72, 2 + 6 * Math.sqrt(d3.sum(Object.values(a.hours)) / maxH), { fill: pnt.fill, fillOpacity: 0.85, hit: { data: a.name, hover: e => tipAt(e, `<b>${a.name}</b><br>charge ${a.charge.toFixed(2)}<br>` + Object.entries(a.hours).map(([p, h]) => `${p} ${h} h`).join(' · ')) } });
       }
       addLabel({ x: x0 + PAD, y: y0 + 92, text: v.artists.slice(0, 3).map(a => a.name).join(', '), base: 11, align: 'left', fitw: CW - 2 * PAD });
-      addLabel({ x: x0 + PAD, y: y0 + 110, text: v.tags.join(' · '), base: 10, color: T.muted, align: 'left', fitw: CW - 2 * PAD });
+      addLabel({ x: x0 + PAD, y: y0 + 110, text: v.blurb || v.tags.join(' · '), base: 10, color: T.muted, align: 'left', fitw: CW - 2 * PAD });
     });
   }
 
@@ -1976,7 +1976,7 @@
     const [A, B] = vibes.people;
     document.getElementById('viberow').hidden = false;
     d3.select('#vibes').selectAll('button').data(vibes.vibes, v => v.key).join('button').attr('class', 'vibe')
-      .attr('title', v => `${v.who === 'both' ? 'both of you' : v.who} · ${v.tags.slice(0, 3).join(', ')}`)
+      .attr('title', v => `${v.blurb ? v.blurb + ' · ' : ''}${v.who === 'both' ? 'both of you' : v.who} · ${v.tags.slice(0, 3).join(', ')}`)
       .html(v => `${v.name}<i style="--a:${Math.round(100 * (v.hours[A] || 0) / (((v.hours[A] || 0) + (v.hours[B] || 0)) || 1))}%"></i>`)
       .on('click', (e, v) => applyVibe(v));
   }
