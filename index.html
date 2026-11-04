@@ -1,0 +1,1842 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Music Tree</title>
+<!--
+  Music Tree – the page. Reads site/tree.json (written by the pipeline) and
+  draws Chris's listening as one of five views, switchable in the bar:
+
+    mindmap  classic two-sided mind map (the default; Decision 1)
+    radial   the same hierarchy as rings around the centre
+    bubbles  circle packing: family bubbles holding artist bubbles
+    genres   sunburst: family -> subgenre (Last.fm tag) -> artist, zoomable
+    river    hours per year as stacked areas, by genre or by artist
+             (export only)
+
+  Rendering: everything is drawn on ONE canvas. Each view builds a scene
+  (a list of shapes and a list of labels in layout coordinates); render()
+  paints it under the current zoom transform on every animation frame
+  that needs one. SVG was tried first and stuttered past ~150 artists
+  because the browser re-rasterised hundreds of paths and haloed text
+  elements per zoom tick (2026-10-10). Hover and click are hit-tested
+  against the scene's shapes with Path2D, newest shape on top.
+
+  Labels are always drawn. Each label knows the room it has (along and
+  across its baseline, in layout pixels) and shrinks to fit it; zooming in
+  grows the room, so a label that was a smudge becomes readable. Past 1:1
+  zoom, text holds a constant screen size instead of growing with the
+  drawing.
+
+  Shared across every view, per docs/Design_Decisions.md:
+    size      sqrt(weight), area-true                          (Decision 2)
+    hue       genre family (six hues; eight in bubbles), or one
+              accent, or an era ramp                           (Decision 6 + toggle)
+    age       desaturate toward grey, or fade by opacity      (Decision 3 + toggle)
+    branches  parent/trunk come pre-computed in tree.json     (Decision 4)
+    songs     tap an artist: in place in the mind map, in the
+              side panel everywhere else                       (Decision 5)
+    slider    how many leaf artists join the fixed trunks      (Decision 7)
+
+  Serve it, don't double-click it: browsers refuse fetch() from file://.
+    cd site && python3 -m http.server 8011      then open http://localhost:8011
+-->
+<style>
+  :root {
+    --bg: #15141c; --surface: #1e1d28; --fg: #ece9f4; --muted: #a39fb4; --line: #34323f;
+    --accent: #f2b84b;
+    /* Eight categorical steps for the dark surface (dataviz palette, in its
+       validated order). Families take them in order of hours. */
+    --fam1: #3987e5; --fam2: #d95926; --fam3: #199e70; --fam4: #c98500;
+    --fam5: #d55181; --fam6: #008300; --fam7: #9085e9; --fam8: #e66767;
+    --other: #8a8794;
+    --grey: #6b6880;             /* what every colour fades toward with age */
+    /* Sparkle: Meghan's palette (2026-11-04), cool hues only: violet, blue,
+       teal, green, lavender, cyan, indigo, mint. Same slot order as fam1-8,
+       so a family keeps its rank, only the hue family changes. */
+    --sp1: #a78bfa; --sp2: #60a5fa; --sp3: #2dd4bf; --sp4: #4ade80;
+    --sp5: #c4b5fd; --sp6: #22d3ee; --sp7: #818cf8; --sp8: #86efac;
+    color-scheme: dark;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f7f5f0; --surface: #ffffff; --fg: #1b1a22; --muted: #5c596b; --line: #dedbe6;
+      --accent: #b87a0c;
+      --fam1: #2a78d6; --fam2: #eb6834; --fam3: #1baf7a; --fam4: #eda100;
+      --fam5: #e87ba4; --fam6: #008300; --fam7: #4a3aa7; --fam8: #e34948;
+      --other: #8d8a9c;
+      --grey: #b8b5c4;
+      --sp1: #7c3aed; --sp2: #2563eb; --sp3: #0d9488; --sp4: #16a34a;
+      --sp5: #8b5cf6; --sp6: #0891b2; --sp7: #4f46e5; --sp8: #15803d;
+      color-scheme: light;
+    }
+  }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+    font: 14px/1.45 -apple-system, "SF Pro Text", system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; }
+
+  #bar { flex: none; z-index: 2; background: var(--bg); border-bottom: 1px solid var(--line);
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px 20px; padding: 8px 16px; }
+  #bar h1 { font-size: 16px; font-weight: 600; margin: 0; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .seg button { font: inherit; font-size: 13px; padding: 4px 10px; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
+  .seg button + button { border-left: 1px solid var(--line); }
+  .seg button[aria-pressed="true"] { background: var(--surface); color: var(--fg); }
+  .seg button:disabled { opacity: 0.4; cursor: default; }
+  .seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .ctl { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+  .ctl input[type=range] { width: 150px; accent-color: var(--accent); }
+  .ctl output { color: var(--fg); font-variant-numeric: tabular-nums; min-width: 3ch; text-align: right; }
+  .ctl.off { opacity: 0.4; }
+  .ctl .mini { font: inherit; font-size: 11px; padding: 2px 7px; border: 1px solid var(--line); border-radius: 4px; background: transparent; color: var(--fg); cursor: pointer; }
+  .ctl .mini[aria-pressed="true"] { background: var(--surface); }
+  .ctl input[type=search] { font: inherit; font-size: 13px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--fg); }
+  .legend { display: flex; gap: 12px; align-items: center; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
+  .legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .legend i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .legend .ramp { width: 56px; height: 8px; border-radius: 4px; }
+  #note { font-size: 12px; color: var(--muted); margin-left: auto; }
+
+  #stage { flex: 1; min-height: 0; display: flex; }
+  #map { flex: 1; min-width: 0; height: 100%; display: block; cursor: grab; touch-action: none; }
+  #map:active { cursor: grabbing; }
+  #map.hit { cursor: pointer; }
+
+  /* Side panel: the song list for every view except the mind map. */
+  #panel { flex: none; width: 280px; border-left: 1px solid var(--line); background: var(--surface);
+    padding: 14px 16px; overflow-y: auto; font-size: 13px; }
+  #panel h2 { font-size: 16px; margin: 0 0 2px; }
+  #panel .meta { color: var(--muted); margin-bottom: 12px; }
+  #panel h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin: 12px 0 4px; }
+  #panel .line { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; }
+  #panel .line small { color: var(--muted); white-space: nowrap; }
+  #panel .song { display: grid; grid-template-columns: 1fr 70px; gap: 8px; align-items: center; padding: 3px 0; }
+  #panel .song span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #panel .song b { display: block; height: 8px; border-radius: 2px; background: var(--accent); opacity: 0.75; }
+  #panel .song small { color: var(--muted); font-variant-numeric: tabular-nums; }
+  #panel button { font: inherit; font-size: 12px; margin-top: 12px; padding: 4px 10px; border-radius: 4px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer; }
+
+  #tip { position: fixed; pointer-events: none; background: var(--fg); color: var(--bg);
+    padding: 6px 9px; border-radius: 4px; font-size: 12px; line-height: 1.35; display: none; max-width: 240px; z-index: 3; }
+  #tip b { font-size: 13px; }
+  #msg { max-width: 60ch; margin: 60px auto; padding: 0 18px; color: var(--muted); }
+  #msg code { display: block; margin-top: 8px; padding: 8px 10px; background: var(--surface);
+    border: 1px solid var(--line); border-radius: 4px; color: var(--fg); }
+  /* The unlock sheet covers the page while the deployed (encrypted) data
+     waits for the passphrase. Local serving never shows it. */
+  #lock { position: fixed; inset: 0; z-index: 5; display: flex; align-items: center; justify-content: center;
+    background: var(--bg); }
+  #lock form { display: flex; flex-direction: column; gap: 10px; width: min(320px, 90vw); }
+  #lock h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
+  #lock p { margin: 0; color: var(--muted); font-size: 13px; }
+  #lock input { font: inherit; font-size: 16px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px;
+    background: var(--surface); color: var(--fg); }
+  #lock button { font: inherit; font-size: 14px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px;
+    background: var(--surface); color: var(--fg); cursor: pointer; }
+  #lock .err { color: #e5737d; min-height: 1.2em; }
+  /* The playlist tray: a sheet along the bottom that collects seeds
+     (songs, artists, genres tapped anywhere) and shows the built list. */
+  #tray { flex: none; z-index: 3; max-height: 46vh; overflow: auto;
+    background: var(--surface); border-top: 1px solid var(--line); padding: 8px 14px 10px; font-size: 13px; }
+  #tray .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 6px; }
+  #tray .mini { font: inherit; font-size: 12px; padding: 3px 9px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--fg); cursor: pointer; }
+  #tray .chip { font: inherit; font-size: 12px; padding: 2px 9px; border: 1px solid var(--accent); border-radius: 12px; background: transparent; color: var(--fg); cursor: pointer; }
+  #tray .chip:hover, #result li:hover b { text-decoration: line-through; }
+  #tray label, #saver span { color: var(--muted); }
+  #tray select, #tray input[type=text] { font: inherit; font-size: 12px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--fg); max-width: 240px; }
+  #traymsg { color: var(--muted); }
+  #result { margin: 0; padding: 0 0 0 22px; columns: 2; column-gap: 28px; }
+  #result li { break-inside: avoid; padding: 2px 0; cursor: pointer; }
+  #result li span { color: var(--muted); }
+  #result li small { display: block; color: var(--muted); font-size: 11px; }
+  #legend .chip { cursor: pointer; }
+  #panel .song { cursor: pointer; }
+  @media (max-width: 700px) { #result { columns: 1; } }
+</style>
+</head>
+<body>
+<div id="bar">
+  <h1>Music Tree</h1>
+  <div class="seg" id="views" role="group" aria-label="View">
+    <button data-view="mindmap">Mind map</button>
+    <button data-view="radial">Radial</button>
+    <button data-view="bubbles">Bubbles</button>
+    <button data-view="genres">Genres</button>
+    <button data-view="river">River</button>
+    <button data-view="duo" title="Needs compare.json">Two of us</button>
+    <button data-view="past" title="Needs compare.json">Past</button>
+    <button data-view="moments" title="Needs compare.json">Moments</button>
+    <button data-view="diary" title="Needs account.json">Diary</button>
+    <button data-view="marquee" title="Needs account.json">Marquee</button>
+    <button data-view="wrapped" title="Needs account.json">Wrapped</button>
+  </div>
+  <div class="ctl" id="personctl">Person
+    <div class="seg" id="persons" role="group" aria-label="Whose tree">
+      <button data-person="0">you</button>
+      <button data-person="1" title="Needs tree2.json">them</button>
+    </div>
+  </div>
+  <div class="ctl" id="riverctl" hidden>Streams
+    <div class="seg" id="riverby" role="group" aria-label="River streams">
+      <button data-riverby="genre">by genre</button>
+      <button data-riverby="artist">by artist</button>
+      <button data-riverby="stacked" title="Needs tree2.json">stacked</button>
+      <button data-riverby="merged" title="Needs tree2.json">merged</button>
+    </div>
+  </div>
+  <div class="ctl" id="yearctl">Year <input id="year" type="range" min="0" max="9" value="9" style="width:120px"> <output id="yearout">all</output>
+    <button type="button" id="play" class="mini" title="Play through the years">&#9654;</button></div>
+  <div class="ctl" id="overlayctl">Overlay
+    <div class="seg" id="overlays" role="group" aria-label="Second person overlay">
+      <button data-overlay="off">off</button>
+      <button data-overlay="on" id="overlayname">them</button>
+    </div>
+  </div>
+  <div class="ctl" id="zoomctl">Zoom <button type="button" id="zoomout" class="mini" title="Zoom out">&minus;</button> <button type="button" id="zoomin" class="mini" title="Zoom in">+</button></div>
+  <label class="ctl" id="findctl" for="find">Find <input id="find" type="search" list="names" placeholder="artist" autocomplete="off" style="width:130px"></label>
+  <datalist id="names"></datalist>
+  <label class="ctl" id="nctl" for="n">Artists <input id="n" type="range" min="0" max="290" value="24"> <output id="nout">24</output></label>
+  <label class="ctl" for="textsize">Text <input id="textsize" type="range" min="0.6" max="1.8" step="0.1" value="1" style="width:90px"></label>
+  <div class="ctl" id="agectl">Age
+    <div class="seg" id="ages" role="group" aria-label="Age encoding">
+      <button data-age="desaturate">grey</button>
+      <button data-age="opacity">transparent</button>
+    </div>
+  </div>
+  <div class="ctl" id="colourctl">Colour
+    <div class="seg" id="colours" role="group" aria-label="Colour encoding">
+      <button data-colour="genre">genre</button>
+      <button data-colour="accent">one hue</button>
+      <button data-colour="era">era</button>
+      <button data-colour="sparkle" title="Cool hues: purple, blue, green">sparkle</button>
+    </div>
+  </div>
+  <div class="legend" id="legend"></div>
+  <span id="note"></span>
+</div>
+<div id="stage">
+  <canvas id="map"></canvas>
+  <aside id="panel" hidden></aside>
+</div>
+<div id="tip"></div>
+<div id="tray" hidden>
+  <div class="row"><b>Playlist</b><span id="seeds" class="row"></span><span id="traymsg"></span><button type="button" id="trayclear" class="mini">clear</button></div>
+  <div class="row">
+    <div class="seg" id="who" role="group" aria-label="Whose songs"><button data-v="me">me</button><button data-v="them">them</button><button data-v="both">both</button></div>
+    <div class="seg" id="pool" role="group" aria-label="Familiar or new"><button data-v="played">songs we play</button><button data-v="new">new to us</button><button data-v="mix">mix</button></div>
+    <div class="seg" id="len" role="group" aria-label="Length"><button data-v="20">20</button><button data-v="30">30</button><button data-v="60">60</button></div>
+    <label><input type="checkbox" id="yearonly"> only <span></span></label>
+    <button type="button" id="buildbtn" class="mini">Build</button>
+    <button type="button" id="copy" class="mini">Copy links</button>
+    <button type="button" id="save" class="mini">Save to Spotify</button>
+  </div>
+  <div class="row" id="saver" hidden>
+    <span>into</span><select id="target"></select>
+    <input id="plname" type="text" placeholder="rename it (optional)" style="width:180px">
+    <button type="button" id="saveadd" class="mini" title="Append the songs to the chosen playlist">Add songs</button>
+    <button type="button" id="savereplace" class="mini" title="Replace everything in the chosen playlist">Replace it</button>
+    <button type="button" id="splogout" class="mini" title="Forget the Spotify login on this device">sign out</button>
+  </div>
+  <ol id="result"></ol>
+  <textarea id="clip" hidden rows="3" style="width:100%"></textarea>
+</div>
+<div id="msg" hidden></div>
+<div id="lock" hidden>
+  <form>
+    <h1>Music Tree</h1>
+    <p>Two listening histories live behind this page. Type the passphrase once per device.</p>
+    <input type="password" autocomplete="current-password" placeholder="passphrase" autofocus>
+    <button type="submit">Unlock</button>
+    <p class="err"></p>
+  </form>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+<script>
+(async function () {
+  // ---------- load ---------------------------------------------------------
+  let tree, tree2 = null, cmp = null, acct = null, picks = null, spotifyId = null;
+
+  // ----- encrypted data (the deployed copy) --------------------------------
+  // Locally the pipeline writes plain tree.json next to this file. On GitHub
+  // Pages the same names exist only as .enc: AES-GCM ciphertext with the key
+  // derived from a passphrase by PBKDF2 (see pipeline/musictree/deploy.py).
+  // The derived key is kept in localStorage so the prompt is a one-time
+  // thing per device; clearing site data brings it back.
+  // deploy.py flips this to true in the copy it publishes, so the deployed
+  // page goes straight to the .enc files instead of probing for plain JSON
+  // first (six 404s per load otherwise). Locally it stays false.
+  const LOCKED = true;
+  const KEY_STORE = 'musictree-key';
+  const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+  let aesKey = null;      // CryptoKey once unlocked, shared by the three files
+  let keySalt = null;     // salt the stored key was derived with, to spot a redeploy
+
+  async function deriveKey(passphrase, salt, iter) {
+    const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(passphrase), 'PBKDF2', false, ['deriveKey']);
+    return crypto.subtle.deriveKey({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: iter }, base,
+      { name: 'AES-GCM', length: 256 }, true, ['decrypt']);
+  }
+  async function storeKey(key, salt) {
+    try {
+      const raw = await crypto.subtle.exportKey('raw', key);
+      localStorage.setItem(KEY_STORE, JSON.stringify({ salt: btoa(String.fromCharCode(...salt)),
+        key: btoa(String.fromCharCode(...new Uint8Array(raw))) }));
+    } catch (e) {}
+  }
+  async function storedKey(salt) {
+    try {
+      const s = JSON.parse(localStorage.getItem(KEY_STORE) || 'null');
+      if (!s || s.salt !== btoa(String.fromCharCode(...salt))) return null;
+      return await crypto.subtle.importKey('raw', b64(s.key), 'AES-GCM', true, ['decrypt']);
+    } catch (e) { return null; }
+  }
+  // Shows the unlock sheet and resolves once a passphrase decrypts `blob`.
+  // A wrong passphrase makes AES-GCM's tag check throw, which is the only
+  // signal there is; the sheet reports it and waits for another try.
+  function unlock(blob) {
+    const lock = document.getElementById('lock'), form = lock.querySelector('form'),
+      input = form.querySelector('input'), err = form.querySelector('.err');
+    lock.hidden = false; input.focus();
+    return new Promise(resolve => {
+      form.onsubmit = async ev => {
+        ev.preventDefault(); err.textContent = 'checking…';
+        try {
+          const key = await deriveKey(input.value, b64(blob.salt), blob.iter);
+          const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64(blob.iv) }, key, b64(blob.ct));
+          await storeKey(key, b64(blob.salt));
+          lock.hidden = true; resolve([key, plain]);
+        } catch (e) { err.textContent = 'that passphrase did not open it'; input.select(); }
+      };
+    });
+  }
+  async function decrypt(blob) {
+    const salt = b64(blob.salt);
+    if (!aesKey || keySalt !== blob.salt) { aesKey = await storedKey(salt); keySalt = blob.salt; }
+    if (aesKey) {
+      try { return await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64(blob.iv) }, aesKey, b64(blob.ct)); }
+      catch (e) { aesKey = null; }   // stored key from an older passphrase
+    }
+    const [key, plain] = await unlock(blob);
+    aesKey = key; return plain;
+  }
+  // Plain file first, encrypted second, null if neither exists. The plain
+  // path is the local dev loop; the encrypted one is the deployed site.
+  async function load(name) {
+    // no-cache makes the browser revalidate each file, so a pipeline rerun
+    // shows up on a plain reload; the old default served a stale
+    // compare.json for a day after the overlay data was added (2026-11-04).
+    if (!LOCKED) {
+      const r = await fetch(name + '.json', { cache: 'no-cache' });
+      if (r.ok) return r.json();
+    }
+    const e = await fetch(name + '.enc', { cache: 'no-cache' });
+    if (!e.ok) return null;
+    return JSON.parse(new TextDecoder().decode(await decrypt(await e.json())));
+  }
+
+  try {
+    tree = await load('tree');
+    if (!tree) throw new Error('no tree');
+    // tree2.json is the second person's tree (`build` writes it when their
+    // export is in place); it powers the person picker and the overlay.
+    try { tree2 = await load('tree2'); } catch (e) {}
+    // compare.json exists only after `compare` has run against a second
+    // person's export; without it the two-person views stay disabled.
+    // account.json likewise needs both Account Data exports (`account`).
+    try { cmp = await load('compare'); } catch (e) {}
+    try { acct = await load('account'); } catch (e) {}
+    // picks.json is the recommender's candidate pool for the playlist tray (`picks`).
+    try { picks = await load('picks'); } catch (e) {}
+    // spotify.json holds the app's client id (public by design) for the
+    // Save button's login; `deploy` writes it. Missing means no Save.
+    try { const r = await fetch('spotify.json', { cache: 'no-cache' }); if (r.ok) spotifyId = (await r.json()).client_id; } catch (e) {}
+  } catch (e) {
+    const m = document.getElementById('msg');
+    m.hidden = false;
+    m.innerHTML = 'tree.json could not be loaded. If you opened this file from disk, serve the folder instead:' +
+      '<code>cd site &amp;&amp; python3 -m http.server 8011</code>then open http://localhost:8011. ' +
+      'If it is served but still failing, run <code>uv run python -m musictree build</code> in pipeline/ to create tree.json.';
+    return;
+  }
+
+  // ---------- constants and scales ----------------------------------------
+  const ROW = 22, COL = 170, SONG_ROW = 15;
+  const TRUNK_COUNT = 10;       // must match TRUNK_COUNT in build_tree.py
+  const FADE_YEARS = 8;         // an artist last played this long ago is fully faded
+  const MAX_SONGS = 15, MIN_SONGS = 3;
+  const FONT = '-apple-system, "SF Pro Text", system-ui, sans-serif';
+  const GLYPH = 0.56;           // average glyph width as a fraction of font size
+  // One tree per person. The person picker swaps which one `tree` and the
+  // lookups below point at (usePerson), so every single-person view draws
+  // whoever is picked without knowing there are two.
+  const trees = [tree, tree2].filter(Boolean);
+  const people = trees.map(t => t.person || 'you');
+  const treeIndex = trees.map(t => new Map(t.artists.map(a => [a.name, a])));   // name -> artist, per tree
+  let today, artists, byId, trunks, trunkIds, maxW, nbr, yearList, famSlot;
+
+  const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+  const T = { fam: d3.range(1, 9).map(i => css(`--fam${i}`)), sp: d3.range(1, 9).map(i => css(`--sp${i}`)), other: css('--other'), grey: css('--grey'),
+              accent: css('--accent'), bg: css('--bg'), fg: css('--fg'), muted: css('--muted'), line: css('--line') };
+
+  const isExport = tree.source === 'export';
+
+  const rScale = d3.scaleSqrt().domain([0, 1]).range([3, 26]);      // area-true (Decision 2); draw() sets the domain
+  const strokeScale = d3.scaleSqrt().domain([0, 1]).range([1, 6]);
+  const songsShown = a => Math.max(MIN_SONGS, Math.min(MAX_SONGS, Math.round(Math.sqrt(a.weight))));
+  // The year scrubber swaps every weight for that year's hours. w() is the
+  // weight every view sizes by; draw() re-domains the scales to match, so
+  // 2019's biggest artist is as big as the all-time biggest.
+  const w = a => state.year ? (a.years?.[state.year] || 0) : a.weight;
+  const hollow = a => !!state.year && !w(a);      // kept for structure, not played that year
+  const radius = a => a.unplaced ? 8 : hollow(a) ? 4 : rScale(w(a));
+  const hours = a => isExport ? `${Math.round(w(a))} h${state.year ? ' in ' + state.year : ''}` : `weight ${a.weight}`;
+  // Label size follows the node: about the node's radius, never under 13px,
+  // so a trunk's name is as tall as half its circle (Chris, 2026-10-10).
+  const fontOf = a => Math.max(13, Math.round(radius(a)));
+
+  // ---------- colour --------------------------------------------------------
+  // Families take palette slots in order of hours, so a family keeps its
+  // hue in every view. The tree views colour six (past that, hues plus age
+  // desaturation stop being tellable apart); bubbles colour eight because
+  // every bubble also prints its family name.
+  const HUES_TREE = 6, HUES_BUBBLES = 8;
+  let famColor = new Map();
+  // Families take hues from the palette the colour mode picks: the dataviz
+  // set for "genre", the cool set for "sparkle". Everything downstream
+  // reads famColor, so one swap recolours every view and the legend.
+  function setHues(k) {
+    const palette = state.colour === 'sparkle' ? T.sp : T.fam;
+    famColor = new Map([...famSlot].filter(([, i]) => i < k).map(([f, i]) => [f, palette[i]]));
+  }
+  const yearsAgo = a => (today - new Date(a.last_played)) / (365.25 * 864e5);
+  const recency = a => Math.max(0, 1 - yearsAgo(a) / FADE_YEARS);   // 1 = this year, 0 = long ago
+  // {fill, opacity} for an artist under the current colour and age modes.
+  // Era colour encodes age itself, so the age toggle is ignored then.
+  function paint(a) {
+    if (a.unplaced) return { fill: 'none', opacity: 1 };
+    const r = recency(a);
+    if (state.colour === 'era') return { fill: d3.interpolateLab(d3.interpolateLab(T.bg, T.accent)(0.3), T.accent)(r), opacity: 1 };
+    const hue = state.colour === 'accent' ? T.accent : famColor.get(a.family);
+    if (state.age === 'opacity') return { fill: hue || T.other, opacity: 0.15 + 0.85 * r };
+    return hue
+      ? { fill: d3.interpolateLab(T.grey, hue)(0.2 + 0.8 * r), opacity: 1 }
+      : { fill: d3.interpolateLab(T.bg, T.other)(0.35 + 0.65 * r), opacity: 1 };
+  }
+
+  // ---------- controls and state --------------------------------------------
+  const VIEW_NAMES = ['mindmap', 'radial', 'bubbles', 'genres', 'river', 'duo', 'past', 'moments', 'diary', 'marquee', 'wrapped'];
+  const state = { person: 0, view: 'mindmap', n: 24, age: 'desaturate', colour: 'genre', riverby: 'genre', riverFamily: null,
+                  sunRoot: null, text: 1, open: new Set(), selected: null, year: null, overlay: 'off', hover: null };
+  try { Object.assign(state, JSON.parse(localStorage.getItem('musictree-state') || '{}'), { open: new Set(), selected: null, riverFamily: null, sunRoot: null, year: null, hover: null }); } catch (e) {}
+  if (VIEW_NAMES.includes(location.hash.slice(1))) state.view = location.hash.slice(1);
+  if (!VIEW_NAMES.includes(state.view)) state.view = 'mindmap';
+  function remember() {
+    try { localStorage.setItem('musictree-state', JSON.stringify({ person: state.person, view: state.view, n: state.n, age: state.age, colour: state.colour, riverby: state.riverby, text: state.text, overlay: state.overlay })); } catch (e) {}
+  }
+
+  const slider = document.getElementById('n'), nout = document.getElementById('nout');
+  slider.addEventListener('input', () => { state.n = +slider.value; draw(); });
+  const textSlider = document.getElementById('textsize');
+  textSlider.value = state.text;
+  textSlider.addEventListener('input', () => { state.text = +textSlider.value; remember(); render(); });
+
+  function segment(id, attr, key) {
+    const el = document.getElementById(id);
+    el.querySelectorAll('button').forEach(b => b.addEventListener('click', () => {
+      state[key] = b.dataset[attr];
+      if (key === 'view') { state.open.clear(); state.selected = null; state.sunRoot = null; location.hash = state.view; }
+      if (key === 'riverby') state.riverFamily = null;
+      if (key === 'person') { usePerson(+state.person); state.open.clear(); state.selected = null; state.sunRoot = null; }
+      draw();
+    }));
+    return () => el.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset[attr] === String(state[key]))));
+  }
+  const syncView = segment('views', 'view', 'view');
+  const syncAge = segment('ages', 'age', 'age');
+  const syncColour = segment('colours', 'colour', 'colour');
+  const syncRiver = segment('riverby', 'riverby', 'riverby');
+  const syncOverlay = segment('overlays', 'overlay', 'overlay');
+  const syncPerson = segment('persons', 'person', 'person');
+  const other = () => trees[1 - state.person] || null;   // the other person's tree, if there is one
+  const otherIndex = () => treeIndex[1 - state.person];
+
+  // Year scrubber: the slider's last stop is "all"; a play button walks
+  // the years at a steady pace and ends back on "all".
+  const yearSlider = document.getElementById('year'), yearOut = document.getElementById('yearout'), playBtn = document.getElementById('play');
+  const setYear = v => { state.year = v < yearList.length ? yearList[v] : null; yearOut.textContent = state.year || 'all'; draw(); };
+  yearSlider.addEventListener('input', () => setYear(+yearSlider.value));
+  let playing = null;
+  function stopPlay() { if (playing) { clearInterval(playing); playing = null; playBtn.setAttribute('aria-pressed', 'false'); playBtn.innerHTML = '&#9654;'; } }
+  playBtn.addEventListener('click', () => {
+    if (playing) return stopPlay();
+    let i = state.year ? yearList.indexOf(state.year) : -1;
+    playBtn.setAttribute('aria-pressed', 'true'); playBtn.innerHTML = '&#9646;&#9646;';
+    const step = () => { i += 1; if (i > yearList.length) return stopPlay(); yearSlider.value = i; setYear(i); };
+    step(); playing = setInterval(step, 1100);
+  });
+
+  // Find: a datalist of every artist; picking one makes it visible (raising
+  // the slider if it has to), selects it, and zooms to it.
+  const findBox = document.getElementById('find');
+  findBox.addEventListener('change', () => {
+    const q = findBox.value.trim().toLowerCase();
+    const a = artists.find(x => x.name.toLowerCase() === q) || artists.find(x => x.name.toLowerCase().startsWith(q));
+    if (!a) return;
+    while (!visibleSet(state.n).has(a.id) && state.n < +slider.max) state.n = Math.min(+slider.max, state.n + 10);
+    slider.value = state.n;
+    if (state.view === 'mindmap') state.open.add(a.id); else state.selected = a.id;
+    draw();
+    const p = scene.pos?.get(a.id);
+    if (p) { const k = Math.max(transform.k, 1.5), vw = canvas.clientWidth, vh = canvas.clientHeight;
+      d3.select(canvas).transition().duration(600).call(zoom.transform, d3.zoomIdentity.translate(vw / 2 - p[0] * k, vh / 2 - p[1] * k).scale(k)); }
+    findBox.blur();
+  });
+
+  // Which controls mean something in which view. A control that cannot
+  // change what is on screen is hidden, not greyed (Chris, 2026-11-04).
+  const RELEVANT = {
+    nctl: ['mindmap', 'radial', 'bubbles', 'genres', 'river', 'duo'],
+    agectl: ['mindmap', 'radial', 'bubbles', 'genres', 'river'],
+    colourctl: ['mindmap', 'radial', 'bubbles', 'genres', 'river', 'duo', 'diary', 'marquee'],
+    riverctl: ['river'],
+    yearctl: ['mindmap', 'radial', 'bubbles', 'genres'],
+    overlayctl: ['mindmap', 'radial', 'bubbles'],
+    personctl: ['mindmap', 'radial', 'bubbles', 'genres', 'river'],
+    zoomctl: VIEW_NAMES,
+    findctl: ['mindmap', 'radial', 'bubbles', 'genres'],
+    legend: ['mindmap', 'radial', 'bubbles', 'genres', 'river', 'duo', 'diary', 'marquee'],
+  };
+  function showControls() {
+    for (const [id, views] of Object.entries(RELEVANT)) document.getElementById(id).hidden = !views.includes(state.view) || (['overlayctl', 'personctl'].includes(id) && trees.length < 2);
+    if (!state.year) stopPlay();
+  }
+  // Two trees unlock the person picker, the overlay and the two-person
+  // rivers; one tree leaves those off. 'both' was the old mirrored river.
+  if (trees.length > 1) { people.forEach((n, i) => { document.querySelector(`[data-person="${i}"]`).textContent = n; }); if (state.riverby === 'both') state.riverby = 'stacked'; }
+  else { state.person = 0; state.overlay = 'off'; document.querySelectorAll('[data-riverby=stacked],[data-riverby=merged]').forEach(b => { b.disabled = true; }); if (['both', 'stacked', 'merged'].includes(state.riverby)) state.riverby = 'genre'; }
+  if (!isExport) document.querySelector('[data-view=river]').disabled = true;  // needs hours per year
+  if (!cmp) { document.querySelectorAll('[data-view=duo],[data-view=past],[data-view=moments]').forEach(b => { b.disabled = true; }); if (['duo', 'past', 'moments'].includes(state.view)) state.view = 'mindmap'; }
+  if (!acct) { document.querySelectorAll('[data-view=diary],[data-view=marquee],[data-view=wrapped]').forEach(b => { b.disabled = true; }); if (['diary', 'marquee', 'wrapped'].includes(state.view)) state.view = 'mindmap'; }
+
+  const legend = d3.select('#legend');
+  function drawLegend() {
+    legend.html('');
+    if (state.colour === 'genre' || state.colour === 'sparkle') {
+      for (const [f, c] of famColor) legend.append('span').attr('class', 'chip').attr('title', 'add this genre to the playlist').html(`<i style="background:${c}"></i>${f}`)
+        .on('click', () => addSeed({ kind: 'genre', key: 'g:' + f, name: f }));
+      legend.append('span').html(`<i style="background:${T.other}"></i>other`);
+    }
+    if (state.view === 'river' && state.riverby === 'merged' && trees.length > 1) legend.append('span').html(`<i style="background:none;border:1.5px solid ${T.fg}"></i>both play it`);
+    const from = state.colour === 'era' ? d3.interpolateLab(T.bg, T.accent)(0.3) : state.age === 'opacity' ? T.bg : T.grey;
+    legend.append('span').html(`<span class="ramp" style="background:linear-gradient(90deg,${from},${T.accent})"></span>older → recent`);
+    if (state.overlay === 'on' && other() && RELEVANT.overlayctl.includes(state.view)) legend.append('span').html(`<i style="background:none;border:2px solid ${OTHER}"></i>${other().person}'s hours`);
+    document.getElementById('agectl').classList.toggle('off', state.colour === 'era');
+  }
+  // Point every per-person lookup at one tree. Called once at start and
+  // again from the person picker; the year scrubber resets because the
+  // two histories cover different years.
+  function usePerson(i) {
+    state.person = trees[i] ? i : 0;
+    tree = trees[state.person]; today = new Date(tree.generated);
+    artists = tree.artists;                       // sorted by weight, heaviest first
+    byId = new Map(artists.map(a => [a.id, a]));
+    trunks = artists.slice(0, TRUNK_COUNT); trunkIds = new Set(trunks.map(a => a.id));
+    maxW = artists[0].weight;
+    // Families take palette slots in this person's order of hours, then the
+    // other person's extras, so the two-person rivers can colour both.
+    famSlot = new Map([...new Set([...tree.families.ranked, ...(other()?.families.ranked || [])])].map((f, i) => [f, i]));
+    // Hover neighbourhood: an artist with its parent, children and
+    // co-listening partners. Built once per person; looked up every frame.
+    nbr = new Map(artists.map(a => [a.id, new Set([a.id])]));
+    for (const a of artists) if (a.parent && nbr.has(a.parent)) { nbr.get(a.id).add(a.parent); nbr.get(a.parent).add(a.id); }
+    for (const l of tree.links) { nbr.get(l.a)?.add(l.b); nbr.get(l.b)?.add(l.a); }
+    yearList = tree.years || []; yearSlider.max = yearList.length; yearSlider.value = yearList.length; state.year = null; yearOut.textContent = 'all';
+    slider.max = artists.length - TRUNK_COUNT; slider.value = Math.min(state.n, +slider.max);
+    d3.select('#names').selectAll('option').data(artists).join('option').attr('value', a => a.name);
+    document.getElementById('overlayname').textContent = other()?.person || 'them';
+    document.getElementById('note').textContent = isExport
+      ? `${people.length > 1 ? tree.person + "'s" : 'Your'} hours from the streaming history. Built ${tree.generated.slice(0, 10)}.`
+      : `Weights are a stand-in from Spotify rankings and your library, not hours. Built ${tree.generated.slice(0, 10)}.`;
+  }
+
+  // ---------- which artists are visible for a given N ----------------------
+  // Trunks are always visible. Leaves are added heaviest-first, but a leaf
+  // can only appear if its parent is visible, so adding one may pull in its
+  // ancestors (a parent can be lighter than its child: the parent is chosen
+  // by co-listening strength, not weight).
+  function visibleSet(n) {
+    const vis = new Set(trunkIds);
+    let count = 0;
+    const order = state.year ? [...artists].sort((p, q) => w(q) - w(p)) : artists;
+    for (const a of order) {
+      if (vis.has(a.id)) continue;
+      if (state.year && !w(a)) break;      // sorted, so nothing after this was played that year
+      const chain = [];
+      let cur = a;
+      while (cur && !vis.has(cur.id)) { chain.push(cur); cur = cur.parent ? byId.get(cur.parent) : null; }
+      if (count + chain.length > n) continue;
+      chain.forEach(x => vis.add(x.id));
+      count += chain.length;
+      if (count >= n) break;
+    }
+    return vis;
+  }
+
+  // One hierarchy: root -> trunks (+ "unplaced" for orphans) -> children.
+  function hierarchyRoots(vis) {
+    const children = new Map(), orphans = [];
+    for (const a of artists) {
+      if (!vis.has(a.id) || trunkIds.has(a.id)) continue;
+      if (a.parent && vis.has(a.parent)) {
+        if (!children.has(a.parent)) children.set(a.parent, []);
+        children.get(a.parent).push(a);
+      } else orphans.push(a);
+    }
+    const toNode = a => ({ a, children: (children.get(a.id) || []).map(toNode) });
+    const roots = trunks.map(toNode);
+    if (orphans.length) roots.push({ a: { id: '_unplaced', name: 'unplaced', weight: 0, unplaced: true }, children: orphans.map(toNode) });
+    return roots;
+  }
+
+  // ---------- scene --------------------------------------------------------
+  // A view builds the scene in layout coordinates; render() paints it.
+  // shape: { path: Path2D, fill, fillOpacity, stroke, strokeWidth,
+  //          strokeOpacity, dash, hit: { data, hover, click } }
+  // label: { x, y, lines, base, fitw, fith, align, rotate, flip, dx, dy,
+  //          weight, color }
+  //   base   designed font size in px
+  //   fitw   room along the baseline in layout px (null = unlimited)
+  //   fith   room across it (null = unlimited)
+  //   rotate radians; flip adds a half turn so left-side text reads upright
+  const scene = { shapes: [], labels: [], bbox: null };
+  function extend(x0, y0, x1, y1) {
+    const b = scene.bbox;
+    scene.bbox = b ? [Math.min(b[0], x0), Math.min(b[1], y0), Math.max(b[2], x1), Math.max(b[3], y1)] : [x0, y0, x1, y1];
+  }
+  function addPath(d, o) {
+    const p = typeof d === 'string' ? new Path2D(d) : d;
+    scene.shapes.push({ path: p, ...o });
+    if (o.bbox) extend(...o.bbox);
+    return p;
+  }
+  function addCircle(x, y, r, o) {
+    const p = new Path2D(); p.arc(x, y, r, 0, 2 * Math.PI);
+    return addPath(p, { ...o, bbox: [x - r, y - r, x + r, y + r] });
+  }
+  function addRect(x, y, w, h, o) {
+    const p = new Path2D(); p.roundRect(x, y, w, h, 2);
+    return addPath(p, { ...o, bbox: [x, y, x + w, y + h] });
+  }
+  function addLine(x0, y0, x1, y1, o) {
+    const p = new Path2D(); p.moveTo(x0, y0); p.lineTo(x1, y1);
+    return addPath(p, { ...o, bbox: [Math.min(x0, x1), Math.min(y0, y1), Math.max(x0, x1), Math.max(y0, y1)] });
+  }
+  function addLabel(l) {
+    l.lines = l.lines || [l.text];
+    l.len = d3.max(l.lines, s => s.length);
+    scene.labels.push(l);
+    // Labels count toward the fit box roughly, honouring alignment so a
+    // long left-aligned subtitle does not widen the box to its left.
+    const w = Math.min(GLYPH * l.base * l.len, l.fitw || Infinity);
+    const x0 = l.align === 'left' ? l.x : l.align === 'right' ? l.x - w : l.x - w / 2;
+    extend(x0, l.y - l.base, x0 + w, l.y + l.base);
+  }
+  // Break a name into up to three lines at word boundaries, balancing the
+  // line lengths, for labels inside bubbles. Single words stay whole.
+  function wrapName(name) {
+    const words = name.split(' ');
+    const nLines = Math.min(3, words.length, Math.ceil(name.length / 11));
+    const target = Math.ceil(name.length / nLines);
+    const lines = [];
+    let cur = '';
+    for (const w of words) {
+      if (cur && (cur + ' ' + w).length > target && lines.length < nLines - 1) { lines.push(cur); cur = w; }
+      else cur = cur ? cur + ' ' + w : w;
+    }
+    lines.push(cur);
+    return lines;
+  }
+
+  // ---------- canvas, zoom, render -----------------------------------------
+  const canvas = document.getElementById('map');
+  const ctx = canvas.getContext('2d');
+  let transform = d3.zoomIdentity, dpr = 1, zooming = false, frame = 0;
+  function size() {
+    dpr = window.devicePixelRatio || 1;
+    canvas.width = canvas.clientWidth * dpr;
+    canvas.height = canvas.clientHeight * dpr;
+  }
+  // Two of us is a long list that already fits the width, so wheel-zoom
+  // only ever made the names smaller: there the wheel scrolls and the
+  // bar's +/- buttons zoom (Chris, 2026-11-04). Pinch and ctrl+wheel still zoom.
+  const scrolls = () => state.view === 'duo' || (state.view === 'river' && state.riverby === 'merged');
+  const zoom = d3.zoom().scaleExtent([0.1, 12])
+    .filter(e => (!e.ctrlKey || e.type === 'wheel') && !e.button && !(scrolls() && e.type === 'wheel' && !e.ctrlKey))
+    .on('start', () => { zooming = true; })
+    .on('zoom', e => { transform = e.transform; render(); })
+    .on('end', () => { zooming = false; render(); });
+  d3.select(canvas).call(zoom).on('dblclick.zoom', null);
+  canvas.addEventListener('wheel', e => {
+    if (!scrolls() || e.ctrlKey) return;
+    e.preventDefault(); d3.select(canvas).call(zoom.translateBy, 0, -e.deltaY / transform.k);
+  }, { passive: false });
+  document.getElementById('zoomin').addEventListener('click', () => d3.select(canvas).transition().duration(200).call(zoom.scaleBy, 1.3));
+  document.getElementById('zoomout').addEventListener('click', () => d3.select(canvas).transition().duration(200).call(zoom.scaleBy, 1 / 1.3));
+  window.addEventListener('resize', () => { size(); render(); });
+
+  function fit(pad = 40) {
+    const b = scene.bbox || [0, 0, 1, 1];
+    const w = b[2] - b[0], h = b[3] - b[1];
+    const vw = canvas.clientWidth, vh = canvas.clientHeight;
+    const k = Math.min(1, (vw - pad) / w, (vh - pad) / h);
+    // Left on the element for debugging a view that fits too small: the
+    // scene's bounding box and the scale it produced.
+    canvas.dataset.fit = JSON.stringify({ bbox: b.map(Math.round), vw, vh, k: +k.toFixed(3) });
+    d3.select(canvas).call(zoom.transform, d3.zoomIdentity.translate(vw / 2 - (b[0] + w / 2) * k, vh / 2 - (b[1] + h / 2) * k).scale(k));
+  }
+
+  // Fit to the width only and start at the top, for views that scroll.
+  function fitWidth(pad = 40) {
+    const b = scene.bbox || [0, 0, 1, 1], w = b[2] - b[0], vw = canvas.clientWidth;
+    const k = Math.min(1, (vw - pad) / w);
+    d3.select(canvas).call(zoom.transform, d3.zoomIdentity.translate(vw / 2 - (b[0] + w / 2) * k, pad / 2 - b[1] * k).scale(k));
+  }
+
+  // Coalesce render requests into one per animation frame.
+  function render() { if (!frame) frame = requestAnimationFrame(paintNow); }
+  function paintNow() {
+    frame = 0;
+    const { k, x, y } = transform, shrink = Math.max(1, k);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight);
+    ctx.setTransform(dpr * k, 0, 0, dpr * k, dpr * x, dpr * y);
+    ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    for (const s of scene.shapes) {
+      const dim = dimmed(s) ? 0.12 : 1;
+      if (s.fill && s.fill !== 'none') { ctx.globalAlpha = (s.fillOpacity ?? 1) * dim; ctx.fillStyle = s.fill; ctx.fill(s.path); }
+      if (s.stroke) {
+        ctx.globalAlpha = (s.strokeOpacity ?? 1) * dim; ctx.strokeStyle = s.stroke; ctx.lineWidth = s.strokeWidth ?? 1;
+        ctx.setLineDash(s.dash || []); ctx.stroke(s.path); ctx.setLineDash([]);
+      }
+    }
+    ctx.globalAlpha = 1;
+    ctx.textBaseline = 'middle';
+    // The halo behind text is skipped mid-gesture; it is the costliest
+    // thing to paint and nobody reads labels while the view is moving.
+    const halo = !zooming;
+    for (const l of scene.labels) {
+      let fs = l.base * state.text / shrink;
+      if (l.fitw) fs = Math.min(fs, (l.fitw - 2) / (GLYPH * l.len));
+      if (l.fith) fs = Math.min(fs, l.fith / (1.1 * l.lines.length));
+      if (fs * k < 0.8) continue;                       // under a pixel on screen: nothing to see
+      ctx.font = `${l.weight || 400} ${fs}px ${FONT}`;
+      ctx.textAlign = l.align || 'center';
+      ctx.save();
+      ctx.globalAlpha = dimmed(l) ? 0.12 : 1;           // labels dim with their nodes on hover
+      ctx.translate(l.x, l.y);
+      if (l.rotate) ctx.rotate(l.rotate + (l.flip ? Math.PI : 0));
+      const dx = (l.dx || 0) * (l.flip ? -1 : 1);
+      if (l.flip) ctx.textAlign = l.align === 'left' ? 'right' : l.align === 'right' ? 'left' : 'center';
+      const lineH = 1.1 * fs, top = (l.dy || 0) - (l.lines.length - 1) * lineH / 2;
+      l.lines.forEach((line, i) => {
+        if (halo) { ctx.lineWidth = 3 / shrink; ctx.strokeStyle = T.bg; ctx.strokeText(line, dx, top + i * lineH); }
+        ctx.fillStyle = l.color || T.fg; ctx.fillText(line, dx, top + i * lineH);
+      });
+      ctx.restore();
+    }
+  }
+
+  // ---------- hit testing, tooltip, panel ----------------------------------
+  function hitAt(e) {
+    const r = canvas.getBoundingClientRect();
+    const px = (e.clientX - r.left) * dpr, py = (e.clientY - r.top) * dpr;
+    const { k, x, y } = transform;
+    ctx.setTransform(dpr * k, 0, 0, dpr * k, dpr * x, dpr * y);
+    for (let i = scene.shapes.length - 1; i >= 0; i--) {
+      const s = scene.shapes[i];
+      if (s.hit && ctx.isPointInPath(s.path, px, py)) return s.hit;
+    }
+    return null;
+  }
+  const tip = d3.select('#tip');
+  const hideTip = () => tip.style('display', 'none');
+  function showTip(e, a) {
+    if (a.unplaced) { hideTip(); return; }
+    if (a.cmp) { tipAt(e, `<b>${a.name}</b><br>${a.family}<br>${Math.round(a.weight)} h`); return; }
+    const yrs = yearsAgo(a), when = yrs < 1 ? 'this year' : `${Math.round(yrs)} year${Math.round(yrs) === 1 ? '' : 's'} ago`;
+    const oh = other() && state.overlay === 'on' ? `<br>${other().person}: ${otherHours(a) ? otherHours(a).toFixed(1) + ' h' : 'never played'}` : '';
+    tipAt(e, `<b>${a.name}</b><br>${a.family}${a.genre ? ' · ' + a.genre : ''}<br>${hours(a)} · last ${when}${oh}<br>${a.songs.length} songs · tap for songs`);
+  }
+  function tipAt(e, html) {
+    tip.style('display', 'block').style('left', (e.clientX + 14) + 'px').style('top', (e.clientY + 14) + 'px').html(html);
+  }
+  const HOVER_VIEWS = ['mindmap', 'radial', 'bubbles'];
+  canvas.addEventListener('mousemove', e => {
+    if (zooming) return;
+    const h = hitAt(e);
+    canvas.classList.toggle('hit', !!h);
+    if (h?.hover) h.hover(e); else hideTip();
+    const id = HOVER_VIEWS.includes(state.view) && h?.data?.id && !h.data.cmp && !h.data.unplaced ? h.data.id : null;
+    if (id !== state.hover) { state.hover = id; render(); }
+  });
+  canvas.addEventListener('mouseleave', () => { hideTip(); if (state.hover) { state.hover = null; render(); } });
+  canvas.addEventListener('click', e => { const h = hitAt(e); if (h?.click) h.click(e); });
+
+  const panel = document.getElementById('panel');
+  function showPanel(a) {
+    if (!a) { panel.hidden = true; return; }
+    const songs = a.songs.slice(0, songsShown(a)), top = songs[0]?.weight || 1;
+    panel.hidden = false;
+    panel.innerHTML = `<h2>${a.name}</h2><div class="meta">${a.family}${a.genre ? ' · ' + a.genre : ''}<br>${hours(a)} · last played ${a.last_played}</div>` +
+      songs.map((s, i) => `<div class="song" data-i="${i}" title="add to the playlist"><span>${s.name}</span><div><b style="width:${Math.round(100 * s.weight / top)}%"></b><small>${isExport ? s.weight + ' plays' : ''}</small></div></div>`).join('') +
+      `<button type="button" id="addartist">+ ${a.name} to playlist</button> <button type="button" id="closepanel">Close</button>`;
+    document.getElementById('closepanel').addEventListener('click', () => { state.selected = null; draw(); });
+    document.getElementById('addartist').addEventListener('click', () => addSeed({ kind: 'artist', key: a.id, name: a.name, a }));
+    panel.querySelectorAll('.song').forEach(el => el.addEventListener('click', () => { const s = songs[+el.dataset.i]; addSeed({ kind: 'song', key: s.uri || a.id + s.name, name: s.name, a, uri: s.uri }); }));
+  }
+  // Any view can put a card in the side panel: free HTML plus a Close button.
+  function showCard(html) {
+    panel.hidden = false; panel.innerHTML = html + `<button type="button" id="closepanel">Close</button>`;
+    document.getElementById('closepanel').addEventListener('click', () => { panel.hidden = true; });
+  }
+  // Tapping an artist: the mind map unfolds songs in place (Decision 5);
+  // every other view selects it and opens the side panel.
+  function tap(a) {
+    if (a.unplaced) return;
+    if (state.view === 'mindmap') {
+      if (state.open.has(a.id)) state.open.delete(a.id);
+      else {
+        for (const id of [...state.open]) if (byId.get(id).trunk === a.trunk) state.open.delete(id);  // one open per trunk
+        state.open.add(a.id);
+      }
+    } else state.selected = state.selected === a.id ? null : a.id;
+    draw();
+  }
+  const artistHit = a => a.unplaced ? null : { data: a, hover: e => showTip(e, a), click: () => tap(a) };
+  const ring = a => (state.open.has(a.id) || state.selected === a.id) ? { stroke: T.fg, strokeWidth: 2 }
+    : seedIds.has(a.id) ? { stroke: T.accent, strokeWidth: 2.5 } : hollow(a) ? { stroke: T.muted, dash: [2, 3] } : {};
+
+  // The second person's hours as a ring around each node they share, on
+  // the same radius scale as Chris's circles so the two sizes compare.
+  // One fixed colour that belongs to no family, readable on both themes.
+  const OTHER = '#ff5fa2';
+  const otherHours = a => { const o = other() && otherIndex().get(a.name); if (!o) return 0; return state.year ? (o.years?.[state.year] || 0) : o.weight; };
+  function overlayRing(x, y, a) {
+    if (state.overlay !== 'on' || !other()) return;
+    const h = otherHours(a);
+    if (h < 0.1) return;
+    addCircle(x, y, rScale(h), { stroke: OTHER, strokeWidth: 2, strokeOpacity: 0.9, aid: a.id, hit: { data: a, hover: e => showTip(e, a), click: () => tap(a) } });
+  }
+
+  // Hover neighbourhood: every shape and label carries the artist it
+  // belongs to (aid; links carry both ends). While an artist is hovered,
+  // paintNow dims whatever is not in nbr (built in usePerson), so the
+  // branches finally say who goes with whom.
+  const near = () => state.hover ? nbr.get(state.hover) : null;
+  const dimmed = s => { const n = near(); if (!n || !s.aid) return false; return !n.has(s.aid) || (s.aid2 && !n.has(s.aid2)); };
+
+  // Cross-links for the open or selected artist: its other co-listening
+  // links, if both ends are on screen, as dashed curves.
+  function crossLinks(ids, pos) {
+    for (const id of ids) {
+      const a = byId.get(id);
+      for (const l of tree.links) {
+        const other = l.a === id ? l.b : l.b === id ? l.a : null;
+        if (!other || other === a.parent || byId.get(other)?.parent === id || !pos.has(other)) continue;
+        addPath(d3.linkHorizontal()({ source: pos.get(id), target: pos.get(other) }),
+          { stroke: T.fg, strokeOpacity: 0.25, strokeWidth: Math.min(4, l.w), dash: [3, 4] });
+      }
+    }
+  }
+  function centre(cx, cy, vis) {
+    addCircle(cx, cy, 22, { fill: T.accent });
+    addLabel({ x: cx, y: cy, text: people.length > 1 ? tree.person : 'you', base: 12, weight: 700, color: T.bg, fitw: 40 });
+    addLabel({ x: cx, y: cy + 38, text: state.year ? `${state.year} · ${[...vis].filter(id => w(byId.get(id))).length} artists · ${Math.round(d3.sum(artists, w))} h` : `${vis.size} of ${artists.length} artists`, base: 11, color: T.muted });
+  }
+
+  // ========== view: mind map ===============================================
+  function mindmap(vis) {
+    const roots = hierarchyRoots(vis);
+    // Split trunks between sides so the two columns end up about the same
+    // height; height is node count plus open song rows, so balance on that.
+    const rows = n => 1 + (state.open.has(n.a.id) ? songsShown(n.a) * SONG_ROW / ROW : 0) + n.children.reduce((s, c) => s + rows(c), 0);
+    const sides = [{ roots: [], h: 0 }, { roots: [], h: 0 }];
+    for (const r of roots) { const s = sides[0].h <= sides[1].h ? sides[0] : sides[1]; s.roots.push(r); s.h += rows(r); }
+
+    const extra = d => state.open.has(d.data.a.id) ? songsShown(d.data.a) * SONG_ROW / ROW : 0;
+    // Each node asks for its radius, its label height when the label sits
+    // above the circle (nodes with children), and its open song rows.
+    const need = d => radius(d.data.a) + (d.children ? fontOf(d.data.a) : 0);
+    const layout = d3.tree().nodeSize([ROW, COL])
+      .separation((a, b) => 1 + (extra(a) + extra(b)) / 2 + (need(a) + need(b)) / ROW + (a.parent === b.parent ? 0 : 0.6));
+    const [right, left] = sides.map(s => layout(d3.hierarchy({ a: { id: '_root' }, children: s.roots })));
+    const px = (d, dir) => dir * (d.depth * COL - COL * 0.35), py = d => d.x;
+    const pos = new Map();
+
+    for (const [root, dir] of [[right, 1], [left, -1]]) {
+      const nodes = root.descendants().filter(d => d.depth > 0);
+      nodes.forEach(d => pos.set(d.data.a.id, [px(d, dir), py(d)]));
+      for (const d of root.children) {
+        const a = d.data.a, p = paint(a);
+        addPath(d3.linkHorizontal()({ source: [0, 0], target: [px(d, dir), py(d)] }),
+          { stroke: a.unplaced ? T.other : p.fill, strokeOpacity: p.opacity, strokeWidth: strokeScale(w(a)), dash: a.unplaced ? [4, 4] : null, aid: a.id });
+      }
+      for (const l of root.links().filter(l => l.source.depth > 0)) {
+        const a = l.target.data.a, p = paint(a);
+        addPath(d3.linkHorizontal()({ source: [px(l.source, dir), py(l.source)], target: [px(l.target, dir), py(l.target)] }),
+          { stroke: p.fill, strokeOpacity: 0.8 * p.opacity, strokeWidth: strokeScale(w(a)), aid: a.id, aid2: l.source.data.a.id });
+      }
+      for (const d of nodes) {
+        const a = d.data.a, r = radius(a), x = px(d, dir), y = py(d), p = paint(a);
+        addCircle(x, y, r, a.unplaced ? { stroke: T.muted, dash: [3, 3], hit: null }
+          : { fill: hollow(a) ? 'none' : p.fill, fillOpacity: p.opacity, ...ring(a), hit: artistHit(a), aid: a.id });
+        overlayRing(x, y, a);
+        // A node with children has branches leaving its outer side, so its
+        // label sits above the circle; a leaf's label sits beside it.
+        addLabel(d.children
+          ? { x, y: y - r - 5 - fontOf(a) / 2, text: a.name, base: fontOf(a), weight: d.depth === 1 ? 600 : 400, aid: a.id }
+          : { x: x + dir * (r + 6), y, text: a.name, base: fontOf(a), align: dir > 0 ? 'left' : 'right', weight: d.depth === 1 ? 600 : 400, aid: a.id });
+        // Open song lists: one row per song under the label, bar = song
+        // weight relative to the artist's top song.
+        if (state.open.has(a.id)) {
+          const songs = a.songs.slice(0, songsShown(a));
+          const bar = d3.scaleLinear().domain([0, songs[0]?.weight || 1]).range([0, 60]);
+          songs.forEach((s, i) => {
+            const sy = y + ROW * 0.5 + 6 + i * SONG_ROW, sx = x + dir * (r + 6);
+            addRect(dir > 0 ? sx : sx - bar(s.weight), sy + 3, bar(s.weight), 7, { fill: T.accent, fillOpacity: 0.75 });
+            addLabel({ x: sx + dir * 66, y: sy + 6.5, text: isExport ? `${s.name} · ${s.weight}` : s.name, base: 11, align: dir > 0 ? 'left' : 'right', color: T.muted });
+            // An invisible row-wide target so a song can be tapped into the
+            // playlist tray; last added wins the hit test, so it sits on top.
+            addRect(dir > 0 ? sx : sx - 240, sy - 1, 240, SONG_ROW, { fill: 'none', hit: { data: a,
+              hover: e => tipAt(e, `<b>${s.name}</b><br>${s.weight} plays · tap to add to the playlist`),
+              click: () => addSeed({ kind: 'song', key: s.uri || a.id + s.name, name: s.name, a, uri: s.uri }) } });
+          });
+          // A small + beside the open artist adds the artist itself as a seed.
+          const bx = x + dir * (r + (d.children ? 10 : GLYPH * fontOf(a) * a.name.length + 22)), by = y;
+          addCircle(bx, by, 7, { stroke: T.accent, strokeWidth: 1.5, fill: T.bg, hit: { data: a,
+            hover: e => tipAt(e, `add <b>${a.name}</b> to the playlist`), click: () => addSeed({ kind: 'artist', key: a.id, name: a.name, a }) } });
+          addLabel({ x: bx, y: by, text: '+', base: 12, weight: 700, color: T.accent });
+        }
+      }
+    }
+    crossLinks(state.open, pos);
+    centre(0, 0, vis);
+    scene.pos = pos;
+  }
+
+  // ========== view: radial tree ============================================
+  function radial(vis) {
+    const root = d3.hierarchy({ a: { id: '_root' }, children: hierarchyRoots(vis) });
+    // d3.tree spaces depths evenly over the radius it is given, which put
+    // the trunks almost on top of the centre at low N. Instead every depth
+    // gets the same ring gap, chosen after the angular layout so that the
+    // closest pair of neighbours on any ring is at least a row, or the
+    // tallest label on that ring, apart.
+    d3.tree().size([2 * Math.PI, 1]).separation((a, b) => (a.parent === b.parent ? 1 : 1.6) / a.depth)(root);
+    // Names run along the spokes, so a spoke near vertical is a name on
+    // its side. The layout's full circle is folded into the two side
+    // wedges, 45° either side of horizontal: the top and bottom stay
+    // empty and every label is within 45° of level (Chris, 2026-11-04).
+    const fold = t => t < Math.PI ? Math.PI / 4 + t / 2 : 5 * Math.PI / 4 + (t - Math.PI) / 2;
+    root.each(d => { if (d.depth) d.x = fold(d.x); });
+    let gap = 160;
+    for (const [depth, nodes] of d3.groups(root.descendants().filter(d => d.depth > 0), d => d.depth)) {
+      const angles = nodes.map(d => d.x).sort(d3.ascending);
+      let minGap = 2 * Math.PI;
+      for (let i = 1; i < angles.length; i++) minGap = Math.min(minGap, angles[i] - angles[i - 1]);
+      if (angles.length > 1) minGap = Math.min(minGap, angles[0] + 2 * Math.PI - angles[angles.length - 1]);
+      // A node with children carries its label beside the spoke, so the
+      // room it needs across the ring is its circle, the label and the
+      // neighbour's circle; a leaf's label runs along the spoke and needs
+      // only its own height.
+      const pitch = Math.max(ROW * 1.15, d3.max(nodes, d => d.children ? 2 * radius(d.data.a) + fontOf(d.data.a) + 6 : 1.25 * fontOf(d.data.a)));
+      if (angles.length > 1) gap = Math.max(gap, pitch / (minGap * depth));
+    }
+    root.each(d => { d.y = d.depth * gap; });
+    const xy = d => [Math.cos(d.x - Math.PI / 2) * d.y, Math.sin(d.x - Math.PI / 2) * d.y];
+    const pos = new Map();
+    root.descendants().filter(d => d.depth > 0).forEach(d => pos.set(d.data.a.id, xy(d)));
+
+    for (const l of root.links()) {
+      const a = l.target.data.a, p = paint(a);
+      addPath(d3.linkRadial().angle(d => d.x).radius(d => d.depth === 0 ? 0 : d.y)(l),
+        { stroke: a.unplaced ? T.other : p.fill, strokeOpacity: 0.8 * p.opacity, strokeWidth: strokeScale(w(a)), dash: a.unplaced ? [4, 4] : null,
+          aid: a.id, aid2: l.source.depth > 0 ? l.source.data.a.id : null, bbox: [Math.min(...[xy(l.source), xy(l.target)].map(q => q[0])), Math.min(...[xy(l.source), xy(l.target)].map(q => q[1])),
+                 Math.max(...[xy(l.source), xy(l.target)].map(q => q[0])), Math.max(...[xy(l.source), xy(l.target)].map(q => q[1]))] });
+    }
+    for (const d of root.descendants().filter(d => d.depth > 0)) {
+      const a = d.data.a, [x, y] = xy(d), r = radius(a), p = paint(a);
+      addCircle(x, y, r, a.unplaced ? { stroke: T.muted, dash: [3, 3] } : { fill: hollow(a) ? 'none' : p.fill, fillOpacity: p.opacity, ...ring(a), hit: artistHit(a), aid: a.id });
+      overlayRing(x, y, a);
+      // Leaf labels run outward along the spoke; a node with children has
+      // branches leaving along the spoke, so its label sits beside it.
+      // Text on the left half is flipped so it reads left to right.
+      const ang = d.x - Math.PI / 2, flip = d.x >= Math.PI;
+      addLabel(d.children
+        ? { x, y, text: a.name, base: fontOf(a), rotate: ang, flip, dy: -(r + 4 + fontOf(a) / 2), weight: d.depth === 1 ? 600 : 400, aid: a.id }
+        : { x, y, text: a.name, base: fontOf(a), rotate: ang, flip, dx: r + 6, align: 'left', weight: d.depth === 1 ? 600 : 400, aid: a.id });
+    }
+    crossLinks(state.selected ? [state.selected] : [], pos);
+    centre(0, 0, vis);
+    scene.pos = pos;
+  }
+
+  // ========== view: circle packing =========================================
+  function bubbles(vis) {
+    const groups = d3.groups(artists.filter(a => vis.has(a.id) && !hollow(a)), a => a.family)
+      .map(([family, kids]) => ({ family, children: kids.map(a => ({ a, value: w(a) })) }));
+    const root = d3.hierarchy({ children: groups }).sum(d => d.value || 0).sort((x, y) => y.value - x.value);
+    d3.pack().size([900, 900]).padding(d => d.depth === 0 ? 12 : 3)(root);
+    for (const d of root.children) {
+      addCircle(d.x, d.y, d.r, { stroke: T.line, dash: [4, 4] });
+      addLabel({ x: d.x, y: d.y - d.r + 14, text: d.data.family.toUpperCase(), base: 12, color: T.muted });
+    }
+    const pos = new Map();
+    for (const d of root.leaves()) {
+      const a = d.data.a, p = paint(a);
+      pos.set(a.id, [d.x, d.y]);
+      addCircle(d.x, d.y, d.r, { fill: p.fill, fillOpacity: p.opacity, ...ring(a), hit: artistHit(a), aid: a.id });
+      // The overlay ring is on the pack's own scale here, since bubble
+      // radius comes from the packing, not rScale.
+      if (state.overlay === 'on' && other() && otherHours(a) >= 0.1) addCircle(d.x, d.y, d.r * Math.sqrt(otherHours(a) / Math.max(w(a), 0.1)), { stroke: OTHER, strokeWidth: 2, strokeOpacity: 0.9, aid: a.id });
+      // Wrapped onto up to three lines; shrinks to the bubble.
+      addLabel({ x: d.x, y: d.y, lines: wrapName(a.name), base: Math.max(11, Math.min(18, Math.round(d.r / 2.4))), fitw: d.r * 1.8, fith: d.r * 1.8, aid: a.id });
+    }
+    scene.pos = pos;
+  }
+
+  // ========== view: genre sunburst =========================================
+  // Three rings: family, subgenre (the Last.fm tag that decided the family),
+  // artist. Angle is hours. Clicking a family or subgenre makes it the
+  // root; clicking the centre goes back up.
+  function genres(vis) {
+    const pool = artists.filter(a => vis.has(a.id));
+    const byFam = d3.groups(pool, a => a.family).map(([family, as]) => ({
+      name: family, kind: 'family',
+      children: d3.groups(as, a => a.genre || 'untagged').map(([sub, bs]) => ({
+        name: sub, kind: 'subgenre', family, children: bs.map(a => ({ name: a.name, kind: 'artist', a, value: w(a) })).filter(d => d.value > 0),
+      })),
+    }));
+    const full = d3.hierarchy({ name: 'you', kind: 'root', children: byFam }).sum(d => d.value || 0).sort((p, q) => q.value - p.value);
+    let root = full;
+    if (state.sunRoot) root = full.descendants().find(d => d.data.kind !== 'artist' && d.data.name === state.sunRoot && d.depth > 0) || full;
+    const R = 540;   // wide rings: labels run along the spoke, so ring width is label room
+    const laid = root.copy().sum(d => d.value || 0).sort((p, q) => q.value - p.value);
+    d3.partition().size([2 * Math.PI, 1])(laid);
+    const inner = 70, ringW = (R - inner) / Math.max(1, laid.height);
+    const arc = d3.arc().startAngle(d => d.x0).endAngle(d => d.x1).padAngle(0.004).padRadius(R)
+      .innerRadius(d => inner + (d.depth - 1) * ringW).outerRadius(d => inner + d.depth * ringW - 2);
+    const colourOf = d => {
+      if (d.data.kind === 'artist') return paint(d.data.a);
+      const fam = d.data.kind === 'family' ? d.data.name : d.data.family;
+      const hue = famColor.get(fam) || T.other;
+      return { fill: d.data.kind === 'family' ? hue : d3.interpolateLab(hue, T.bg)(0.3), opacity: 1 };
+    };
+    const pos = new Map();
+    for (const d of laid.descendants().filter(d => d.depth > 0)) {
+      const c = colourOf(d);
+      if (d.data.kind === 'artist') { const m = (d.x0 + d.x1) / 2 - Math.PI / 2, rr = inner + (d.depth - 0.5) * ringW; pos.set(d.data.a.id, [Math.cos(m) * rr, Math.sin(m) * rr]); }
+      const hit = d.data.kind === 'artist' ? artistHit(d.data.a) : {
+        data: d,
+        hover: e => tipAt(e, `<b>${d.data.name}</b><br>${d.data.kind}${d.data.kind === 'subgenre' ? ' in ' + d.data.family : ''}<br>${Math.round(d.value)} h · ${d.leaves().length} artists · tap to zoom`),
+        click: () => { state.sunRoot = d.data.name; state.selected = null; draw(); },
+      };
+      addPath(arc(d), { fill: c.fill, fillOpacity: c.opacity, stroke: T.bg, strokeWidth: 0.5, hit, bbox: [-R, -R, R, R] });
+      // Label along the spoke through the wedge's middle: room along it is
+      // the ring width, across it the arc length at the label's radius.
+      const mid = (d.x0 + d.x1) / 2, r = inner + (d.depth - 0.5) * ringW, ang = mid - Math.PI / 2;
+      addLabel({ x: Math.cos(ang) * r, y: Math.sin(ang) * r, text: d.data.name, base: d.data.kind === 'family' ? 15 : 12,
+                 rotate: ang, flip: mid > Math.PI, fitw: ringW - 8, fith: (d.x1 - d.x0) * r, weight: d.data.kind === 'family' ? 600 : 400 });
+    }
+    // Centre: back up one level, or "you" at the top.
+    const up = root !== full;
+    addCircle(0, 0, inner - 8, { fill: T.accent, hit: up ? { click: () => { state.sunRoot = root.parent && root.parent !== full ? root.parent.data.name : null; draw(); } } : null });
+    addLabel({ x: 0, y: up ? -4 : 0, text: up ? root.data.name : 'you', base: 12, weight: 700, color: T.bg, fitw: inner * 1.7 });
+    if (up) addLabel({ x: 0, y: 10, text: '← back', base: 10, color: T.bg });
+    scene.pos = pos;
+  }
+
+  // Hours per family per year over one tree's artists, optionally only
+  // those that pass `keep`. Both two-person rivers are built from this.
+  function famYears(t, keep = () => true) {
+    const out = {};
+    for (const a of t.artists) if (keep(a)) for (const [y, h] of Object.entries(a.years || {})) { const f = out[a.family] ||= {}; f[y] = (f[y] || 0) + h; }
+    return out;
+  }
+  function riverAxes(years, x, y, top, H, LEFT, W, title) {
+    addLine(LEFT, top + H - 28, W - 30, top + H - 28, { stroke: T.line });
+    for (const yr of years) { addLine(x(+yr), top + H - 28, x(+yr), top + H - 23, { stroke: T.line }); addLabel({ x: x(+yr), y: top + H - 14, text: yr, base: 11, color: T.muted }); }
+    addLine(LEFT, top + 20, LEFT, top + H - 28, { stroke: T.line });
+    for (const t of y.ticks(5)) { if (!t) continue; addLine(LEFT - 5, y(t), LEFT, y(t), { stroke: T.line }); addLabel({ x: LEFT - 8, y: y(t), text: String(t), base: 11, color: T.muted, align: 'right' }); }
+    addLabel({ x: LEFT, y: top + 8, text: title, base: 12, weight: 600, align: 'left' });
+  }
+
+  // ---- River, stacked: one full river per person, one above the other on
+  // a shared year axis. Each has its own hours scale so both read at full
+  // height; the first version mirrored them on one scale and the lighter
+  // listener's river was a sliver (Chris, 2026-11-04).
+  function riverStacked() {
+    const years = [...new Set(trees.flatMap(t => t.years))].sort();
+    const W = 1200, H = 330, LEFT = 70, GAPY = 30;
+    const x = d3.scaleLinear().domain([+years[0], +years[years.length - 1]]).range([LEFT, W - 30]);
+    trees.forEach((t, i) => {
+      const top = i * (H + GAPY);
+      const hrs = famYears(t), fams = [...famSlot.keys(), 'other'].filter(f => hrs[f]);
+      const rows = years.map(y => { const r = { year: +y }; fams.forEach(f => r[f] = hrs[f]?.[y] || 0); return r; });
+      const series = d3.stack().keys(fams)(rows);
+      const y = d3.scaleLinear().domain([0, d3.max(series, s => d3.max(s, d => d[1])) || 1]).nice().range([top + H - 30, top + 20]);
+      const area = d3.area().x(d => x(d.data.year)).y0(d => y(d[0])).y1(d => y(d[1])).curve(d3.curveCatmullRom.alpha(0.5));
+      for (const s of series) {
+        if (!d3.sum(s, d => d[1] - d[0])) continue;
+        addPath(area(s), { fill: famColor.get(s.key) || T.other, fillOpacity: 0.85, stroke: T.bg, strokeWidth: 0.5, bbox: [0, top, W, top + H],
+          hit: { data: s.key, hover: e => tipAt(e, `<b>${s.key}</b><br>${t.person}: ${Math.round(d3.sum(s, d => d[1] - d[0]))} h over the years`) } });
+        const k = d3.maxIndex(s, d => d[1] - d[0]), d = s[k];
+        addLabel({ x: x(d.data.year), y: (y(d[0]) + y(d[1])) / 2, text: s.key, base: 13, weight: 600, fith: y(d[0]) - y(d[1]), align: k === 0 ? 'left' : k === years.length - 1 ? 'right' : 'center' });
+      }
+      riverAxes(years, x, y, top, H, LEFT, W, `${t.person} · hours per year by genre, top ${t.artists.length} artists`);
+    });
+  }
+
+  // ---- River, merged: one row per genre. The first person's hours on
+  // artists only they play run above the row's centre line, the second
+  // person's below, and the hours either spends on artists they both play
+  // sit on the line as one outlined band. A fixed gap keeps the outer
+  // bands apart where nothing is shared, so a genre the two have not met
+  // in yet shows as two separate streams, and one they share closes up
+  // around the middle. One hours scale for every band, so thickness
+  // compares across rows.
+  function riverMerged() {
+    const [t0, t1] = trees;
+    const years = [...new Set(trees.flatMap(t => t.years))].sort();
+    const shared = new Set(t0.artists.filter(a => a.weight >= 1 && (treeIndex[1].get(a.name)?.weight || 0) >= 1).map(a => a.name));
+    const ex0 = famYears(t0, a => !shared.has(a.name)), sh0 = famYears(t0, a => shared.has(a.name));
+    const ex1 = famYears(t1, a => !shared.has(a.name)), sh1 = famYears(t1, a => shared.has(a.name));
+    const total = f => d3.sum([ex0, sh0, sh1, ex1], o => d3.sum(Object.values(o[f] || {})));
+    const fams = [...famSlot.keys(), 'other'].filter(f => total(f) >= 5).sort((p, q) => total(q) - total(p));
+    const W = 1200, LEFT = 90, GAP = 5, ROWH = 170, PAD = 12;
+    const x = d3.scaleLinear().domain([+years[0], +years[years.length - 1]]).range([LEFT, W - 30]);
+    const peak = d3.max(fams, f => d3.max(years, y => d3.sum([ex0, sh0, sh1, ex1], o => o[f]?.[y] || 0))) || 1;
+    // Area-true like the node radii. The range is half a row, so even a
+    // band that is all one person's stays inside its row.
+    const px = d3.scaleSqrt().domain([0, peak]).range([0, ROWH / 2 - GAP - 6]);
+    const curve = d3.curveCatmullRom.alpha(0.5);
+    let top = 30;
+    for (const f of fams) {
+      const mid = top + PAD + ROWH / 2, hue = famColor.get(f) || T.other;
+      const v = (o, y) => px(o[f]?.[y] || 0), hoursOf = o => Math.round(d3.sum(years, y => o[f]?.[y] || 0));
+      const band = (y0of, y1of, opacity, stroke, html) => {
+        const pts = years.map(y => ({ x: x(+y), y0: y0of(y), y1: y1of(y) }));
+        if (!pts.some(p => p.y1 - p.y0 > 0.01)) return;
+        addPath(d3.area().x(p => p.x).y0(p => p.y0).y1(p => p.y1).curve(curve)(pts),
+          { fill: hue, fillOpacity: opacity, stroke: stroke || T.bg, strokeWidth: stroke ? 1.2 : 0.5, bbox: [0, top, W, top + ROWH + PAD], hit: { data: f, hover: e => tipAt(e, html) } });
+      };
+      band(y => mid - v(sh0, y), y => mid + v(sh1, y), 0.95, T.fg, `<b>${f}</b> · artists you both play<br>${t0.person} ${hoursOf(sh0)} h · ${t1.person} ${hoursOf(sh1)} h`);
+      band(y => mid - v(sh0, y) - GAP - v(ex0, y), y => mid - v(sh0, y) - GAP, 0.8, null, `<b>${f}</b> · only ${t0.person} plays<br>${hoursOf(ex0)} h`);
+      band(y => mid + v(sh1, y) + GAP, y => mid + v(sh1, y) + GAP + v(ex1, y), 0.45, null, `<b>${f}</b> · only ${t1.person} plays<br>${hoursOf(ex1)} h`);
+      addLine(LEFT, mid, W - 30, mid, { stroke: T.line, dash: [2, 4] });
+      addLabel({ x: 8, y: mid, text: f, base: 13, weight: 600, align: 'left', fitw: LEFT - 16 });
+      top += ROWH + PAD;
+    }
+    for (const yr of years) { addLine(x(+yr), 30, x(+yr), top, { stroke: T.line, strokeOpacity: 0.35 }); addLabel({ x: x(+yr), y: top + 12, text: yr, base: 11, color: T.muted }); }
+    addLabel({ x: W - 30, y: 12, text: `${t0.person} above each line, ${t1.person} below (lighter), what you both play on it (outlined)`, base: 11, color: T.muted, align: 'right' });
+  }
+
+  // ========== view: timeline river =========================================
+  // Two modes. By genre: one stream per family, summed over the top 400
+  // artists, so the shape shows taste shifting between genres. By artist:
+  // every visible artist as its own stream, optionally only one family
+  // (tap a genre stream to get there). Stacked from zero with a hours axis
+  // on the left; streams sit in family order so same-genre bands touch.
+  function river(vis) {
+    if (state.riverby === 'stacked' && trees.length > 1) return riverStacked();
+    if (state.riverby === 'merged' && trees.length > 1) return riverMerged();
+    const years = tree.years;
+    const byGenre = state.riverby === 'genre';
+    let streams, fillOf, hoverOf, tapOf;
+    if (byGenre) {
+      const fams = [...tree.families.ranked, 'other'];
+      streams = fams.map(f => ({ key: f, name: f, years: Object.fromEntries(years.map(y =>
+        [y, d3.sum(artists.filter(a => a.family === f), a => a.years?.[y] || 0)])) })).filter(s => d3.sum(Object.values(s.years)) > 0);
+      fillOf = s => ({ fill: famColor.get(s.key) || T.other, opacity: 1 });
+      hoverOf = (e, s) => tipAt(e, `<b>${s.name}</b><br>${Math.round(d3.sum(Object.values(s.years)))} h over ${years.length} years<br>tap to see its artists`);
+      tapOf = s => { state.riverby = 'artist'; state.riverFamily = s.key; state.selected = null; draw(); };
+    } else {
+      let pool = artists.filter(a => vis.has(a.id));
+      if (state.riverFamily) pool = artists.filter(a => a.family === state.riverFamily);
+      streams = pool.map(a => ({ key: a.id, name: a.name, years: a.years || {}, a }));
+      fillOf = s => paint(s.a);
+      hoverOf = (e, s) => showTip(e, s.a);
+      tapOf = s => tap(s.a);
+    }
+    const famRank = s => byGenre ? (famSlot.has(s.key) ? famSlot.get(s.key) : 99) : (famSlot.has(s.a.family) ? famSlot.get(s.a.family) : 99);
+    streams.sort((p, q) => famRank(p) - famRank(q) || d3.sum(Object.values(q.years)) - d3.sum(Object.values(p.years)));
+    const rows = years.map(y => { const r = { year: +y }; streams.forEach(s => r[s.key] = s.years[y] || 0); return r; });
+    const series = d3.stack().keys(streams.map(s => s.key)).offset(d3.stackOffsetNone).order(d3.stackOrderNone)(rows);
+    const byKey = new Map(streams.map(s => [s.key, s]));
+    const W = 1200, H = byGenre ? 600 : 760, LEFT = 70;
+    const x = d3.scaleLinear().domain(d3.extent(rows, r => r.year)).range([LEFT, W - 30]);
+    const y = d3.scaleLinear().domain([0, d3.max(series, s => d3.max(s, d => d[1]))]).nice().range([H - 30, 20]);
+    const area = d3.area().x(d => x(d.data.year)).y0(d => y(d[0])).y1(d => y(d[1])).curve(d3.curveCatmullRom.alpha(0.5));
+
+    for (const s of series) {
+      const st = byKey.get(s.key), c = fillOf(st);
+      addPath(area(s), { fill: c.fill, fillOpacity: c.opacity * (state.selected && state.selected !== s.key ? 0.3 : 0.85), stroke: T.bg, strokeWidth: 0.5,
+        hit: { data: st, hover: e => hoverOf(e, st), click: () => tapOf(st) }, bbox: [0, 0, W, H] });
+      // Label at the widest year; the room across it is the stream's
+      // thickness there, so thin streams carry tiny labels that grow on zoom.
+      const i = d3.maxIndex(s, d => d[1] - d[0]), d = s[i];
+      addLabel({ x: x(d.data.year), y: (y(d[0]) + y(d[1])) / 2, text: st.name, base: byGenre ? 14 : 12, fith: y(d[0]) - y(d[1]),
+                 weight: byGenre ? 600 : 400, align: i === 0 ? 'left' : i === years.length - 1 ? 'right' : 'center' });
+    }
+    // Axes, drawn by hand: years along the bottom, hours up the left.
+    addLine(LEFT, H - 28, W - 30, H - 28, { stroke: T.line });
+    for (const yr of years) { addLine(x(+yr), H - 28, x(+yr), H - 23, { stroke: T.line }); addLabel({ x: x(+yr), y: H - 14, text: yr, base: 11, color: T.muted }); }
+    addLine(LEFT, 20, LEFT, H - 28, { stroke: T.line });
+    for (const t of y.ticks(8)) { addLine(LEFT - 5, y(t), LEFT, y(t), { stroke: T.line }); addLabel({ x: LEFT - 8, y: y(t), text: String(t), base: 11, color: T.muted, align: 'right' }); }
+    addLabel({ x: LEFT - 48, y: (H - 30 + 20) / 2, text: 'hours per year', base: 11, color: T.muted, rotate: -Math.PI / 2 });
+    const title = byGenre ? `By genre, top ${artists.length} artists`
+      : state.riverFamily ? `${streams.length} ${state.riverFamily} artists` : `${streams.length} artists`;
+    addLabel({ x: LEFT, y: 10, text: title, base: 11, color: T.muted, align: 'left' });
+    if (state.riverFamily) {
+      addLabel({ x: LEFT + 6.5 * title.length + 14, y: 10, text: '← all genres', base: 11, color: T.accent, align: 'left' });
+      addRect(LEFT + 6.5 * title.length + 10, 2, 90, 16, { fill: 'none', hit: { click: () => { state.riverby = 'genre'; state.riverFamily = null; draw(); } } });
+    }
+  }
+
+  // ========== two-person views (need compare.json) ========================
+  // Families for the second person's artists come from compare.json, so
+  // colour works the same way; hours are the person's own.
+  const cmpFamily = new Map();
+  if (cmp) {
+    cmp.shared.forEach(r => cmpFamily.set(r.name, r.family));
+    cmp.recent_top.flat().forEach(r => cmpFamily.set(r.name, r.family));
+    cmp.bridges.flat().forEach(r => cmpFamily.set(r.name, r.family));
+  }
+  // A stand-in artist record so paint() and the tooltip work for names
+  // that are not in Chris's tree.
+  const pseudo = (name, hours, last) => ({ id: 'cmp:' + name, name, weight: hours, family: cmpFamily.get(name) || byId.get(name)?.family || 'other',
+    genre: '', last_played: last || tree.generated.slice(0, 10), songs: [], cmp: true });
+  const byName = treeIndex[0];
+  function cmpHit(name, html) { return { data: name, hover: e => tipAt(e, html) }; }
+
+  // ---- Two of us: a butterfly chart. Shared artists run down a centre
+  // column, one name per row; the first person's hours grow left as a
+  // bar, the second person's grow right. Symmetric bars are duets,
+  // lopsided bars show whose artist it really is, and nothing can overlap
+  // because names own the middle. Below the shared block, each person's
+  // own current favourites as one-sided bars, then the bridges (one
+  // person's artists the other has never played, next to things they
+  // love) as outlined bars pointing at the person they are for. The
+  // first version was a two-sided mind map; names on the spine collided
+  // with hour counts and branch lines (Chris, 2026-10-24).
+  function duo(vis) {
+    const [A, B] = cmp.people;
+    const n = Math.min(80, Math.max(6, state.n));
+    const spine = cmp.shared.slice(0, n);
+    const spineSet = new Set(spine.map(r => r.name));
+    const own = [0, 1].map(i => cmp.recent_top[i].filter(r => !spineSet.has(r.name)).slice(0, Math.ceil(n / 3)));
+    const bridges = [cmp.bridges[1].slice(0, 6), cmp.bridges[0].slice(0, 6)];   // on A's side: A's artists for B; on B's side: B's for A
+    const MID = 150, BAR = 360, PITCH = 20;
+    const maxH = d3.max([...spine.flatMap(r => r.hours), ...own.flat().map(r => r.hours), ...bridges.flat().map(r => r.hours)]) || 1;
+    const bx = d3.scaleLinear().domain([0, maxH]).range([0, BAR]);
+    const dir = [-1, 1];
+    const sideX = i => dir[i] * MID;
+    let y = 0;
+
+    function header(text) {
+      y += PITCH * 0.6;
+      addLabel({ x: 0, y, text: text.toUpperCase(), base: 11, weight: 600, color: T.muted });
+      y += PITCH * 1.1;
+    }
+    function bar(i, hours, p, outline, hit) {
+      const w = bx(hours), x0 = i === 0 ? sideX(0) - w : sideX(1);
+      if (outline) addRect(x0, y - 7, Math.max(w, 2), 14, { stroke: p.fill, strokeWidth: 1.5, dash: [4, 3], hit });
+      else addRect(x0, y - 7, Math.max(w, 2), 14, { fill: p.fill, fillOpacity: p.opacity, hit });
+      addLabel({ x: sideX(i) + dir[i] * (w + 6), y, text: `${Math.round(hours)} h`, base: 10, color: T.muted, align: i === 0 ? 'right' : 'left' });
+    }
+
+    // Column heads and a scale for each side.
+    for (const i of [0, 1]) {
+      addLabel({ x: sideX(i) + dir[i] * BAR / 2, y: -34, text: [A, B][i], base: 16, weight: 700 });
+      for (const t of bx.ticks(4).slice(1)) {
+        addLine(sideX(i) + dir[i] * bx(t), -16, sideX(i) + dir[i] * bx(t), -10, { stroke: T.line });
+        addLabel({ x: sideX(i) + dir[i] * bx(t), y: -22, text: `${t} h`, base: 10, color: T.muted });
+      }
+    }
+
+    header(`shared, by hours you both have`);
+    for (const r of spine) {
+      const a = pseudo(r.name, r.hours[0] + r.hours[1]), p = paint(a);
+      const html = `<b>${r.name}</b><br>${r.family}<br>${A} ${r.hours[0]} h since ${r.first[0]}<br>${B} ${r.hours[1]} h since ${r.first[1]}`;
+      addLabel({ x: 0, y, text: r.name, base: 12, weight: 500, fitw: MID * 2 - 20 });
+      bar(0, r.hours[0], p, false, cmpHit(r.name, html));
+      bar(1, r.hours[1], p, false, cmpHit(r.name, html));
+      // A faint tick at equal hours makes duets jump out.
+      y += PITCH;
+    }
+
+    header(`each other's year: current favourites the other is not playing`);
+    const rows = Math.max(own[0].length, own[1].length);
+    for (let k = 0; k < rows; k++) {
+      for (const i of [0, 1]) {
+        const r = own[i][k];
+        if (!r) continue;
+        const a = pseudo(r.name, r.hours), p = paint(a);
+        const other = cmp.shared.find(s => s.name === r.name);
+        addLabel({ x: sideX(i) - dir[i] * 8, y, text: r.name, base: 12, align: i === 0 ? 'left' : 'right', fitw: MID - 14 });
+        bar(i, r.hours, p, false, cmpHit(r.name, `<b>${r.name}</b><br>${r.family}<br>${[A, B][i]} this year: ${r.hours} h<br>${[B, A][i]}: ${other ? other.hours[1 - i] + ' h all time' : 'never played'}`));
+      }
+      y += PITCH;
+    }
+
+    header(`you might like: next to artists you already love`);
+    const brows = Math.max(bridges[0].length, bridges[1].length);
+    for (let k = 0; k < brows; k++) {
+      for (const i of [0, 1]) {
+        const b = bridges[i][k];
+        if (!b) continue;
+        const a = pseudo(b.name, b.hours), p = paint(a);
+        addLabel({ x: sideX(i) - dir[i] * 8, y, text: `${i === 0 ? '→ ' : ''}${b.name}${i === 1 ? ' ←' : ''}`, base: 12, align: i === 0 ? 'left' : 'right', fitw: MID - 14 });
+        bar(i, b.hours, p, true, cmpHit(b.name, `<b>${b.name}</b><br>${b.family}<br>${[A, B][i]} ${b.hours} h; new to ${[B, A][i]}<br>sits next to ${b.via.join(', ')}`));
+      }
+      y += PITCH;
+    }
+    addLabel({ x: 0, y: y + 6, text: `outlined bars are ${A}'s picks for ${B} (left) and ${B}'s for ${A} (right)`, base: 10, color: T.muted });
+
+    // The card: three lines above the column heads. Kept short on purpose;
+    // every extra line here shrinks the whole chart to fit the screen.
+    const o = cmp.overlap, mp = cmp.most_played;
+    const peak = cmp.clock.map(c => d3.maxIndex(c));
+    const lines = [
+      `${A} & ${B}`,
+      `overlap ${o.weighted} · ${o.shared_artists} shared artists · ${o.shared_recent} both played this year · ${cmp.duets.length} duets · ${cmp.same_day.length} same-song-same-day moments`,
+      `most played ever: ${A} "${mp[0].track}" (${mp[0].artist}), ${B} "${mp[1].track}" (${mp[1].artist}) · peak hour ${peak[0]}:00 and ${peak[1]}:00`,
+    ];
+    lines.forEach((t, i) => addLabel({ x: 0, y: -96 + i * 17, text: t, base: i === 0 ? 16 : 11, weight: i === 0 ? 700 : 400, color: i === 0 ? T.fg : T.muted }));
+  }
+
+  // ---- Past: how the two tastes moved by year. A similarity line (cosine
+  // of the artist-hours vectors), with each year's shared artists listed
+  // under the axis and pick-ups above it: artists one person started that
+  // the other had already been playing.
+  function past(vis) {
+    const [A, B] = cmp.people;
+    const yrs = cmp.years.filter(y => y.hours[0] && y.hours[1]);
+    const solo = cmp.years.filter(y => !(y.hours[0] && y.hours[1]));
+    const W = 1200, H = 300, LEFT = 70, COLW = (W - LEFT - 30) / Math.max(1, cmp.years.length);
+    const x = y => LEFT + COLW * (cmp.years.indexOf(y) + 0.5);
+    const ys = d3.scaleLinear().domain([0, Math.max(0.2, d3.max(yrs, y => y.sim) || 0.2)]).nice().range([H - 30, 30]);
+    // Axes.
+    addLine(LEFT, 30, LEFT, H - 30, { stroke: T.line });
+    for (const t of ys.ticks(4)) { addLine(LEFT - 5, ys(t), LEFT, ys(t), { stroke: T.line }); addLabel({ x: LEFT - 8, y: ys(t), text: t.toFixed(2), base: 11, color: T.muted, align: 'right' }); }
+    addLabel({ x: LEFT - 50, y: H / 2, text: 'similarity', base: 11, color: T.muted, rotate: -Math.PI / 2 });
+    addLine(LEFT, H - 30, W - 30, H - 30, { stroke: T.line });
+    cmp.years.forEach(y => addLabel({ x: x(y), y: H - 16, text: String(y.year), base: 12, weight: 600, color: T.muted }));
+    // Years only one person has: one label across each run of them, and
+    // that person's top artist under each year so the run is not blank.
+    let run = [];
+    const flush = () => {
+      if (!run.length) return;
+      const who = run[0].hours[0] ? A : B;
+      addLabel({ x: (x(run[0]) + x(run[run.length - 1])) / 2, y: ys(0) - 12, text: `${who} only (${run[0].year}${run.length > 1 ? '–' + run[run.length - 1].year : ''})`, base: 10, color: T.muted });
+      run = [];
+    };
+    cmp.years.forEach(y => { if (!(y.hours[0] && y.hours[1])) run.push(y); else flush(); });
+    flush();
+    solo.forEach(y => {
+      const i = y.hours[0] ? 0 : 1;
+      y.tops[i].slice(0, 3).forEach((t, j) => {
+        const a = pseudo(t.name, t.hours), p = paint(a);
+        addCircle(x(y) - COLW / 2 + 10, H + 18 + j * 16, 4, { fill: p.fill, fillOpacity: p.opacity });
+        addLabel({ x: x(y) - COLW / 2 + 18, y: H + 18 + j * 16, text: t.name, base: 11, align: 'left', fitw: COLW - 24, color: T.muted });
+      });
+    });
+    // The line.
+    if (yrs.length > 1) {
+      const line = d3.line().x(y => x(y)).y(y => ys(y.sim)).curve(d3.curveMonotoneX);
+      addPath(line(yrs), { stroke: T.accent, strokeWidth: 2.5, bbox: [LEFT, 0, W, H] });
+    }
+    // The card behind a year: everything compare.json holds for it.
+    const line = (name, right) => `<div class="line"><span>${name}</span><small>${right}</small></div>`;
+    const list = (arr, f) => arr.length ? arr.map(f).join('') : '<div class="meta">none</div>';
+    const yearCard = y => `<h2>${y.year}</h2><div class="meta">similarity ${y.sim} · ${y.shared} shared artists<br>${A} ${y.hours[0]} h · ${B} ${y.hours[1]} h</div>` +
+      `<h3>shared that year</h3>${list(y.top_shared, s => line(s.name, `${s.hours[0]} / ${s.hours[1]} h`))}` +
+      `<h3>${A}'s top</h3>${list(y.tops[0], t => line(t.name, t.hours + ' h'))}` +
+      `<h3>${B}'s top</h3>${list(y.tops[1], t => line(t.name, t.hours + ' h'))}` +
+      `<h3>picked up</h3>${list(y.pickups, p => line(p.name, p.by))}`;
+    cmp.years.forEach(y => addRect(x(y) - COLW / 2, H - 26, COLW, 20, { fill: 'none', hit: { data: String(y.year), hover: e => tipAt(e, `<b>${y.year}</b> · tap for the year`), click: () => showCard(yearCard(y)) } }));
+    yrs.forEach(y => {
+      const r = 4 + Math.sqrt(y.shared) / 2;
+      addCircle(x(y), ys(y.sim), r, { fill: T.accent, hit: { ...cmpHit(String(y.year),
+        `<b>${y.year}</b> · similarity ${y.sim}<br>${y.shared} shared artists<br>${A} ${y.hours[0]} h: ${y.tops[0].slice(0, 3).map(t => t.name).join(', ')}<br>${B} ${y.hours[1]} h: ${y.tops[1].slice(0, 3).map(t => t.name).join(', ')}<br>tap for the whole year`), click: () => showCard(yearCard(y)) } });
+      addLabel({ x: x(y), y: ys(y.sim) - r - 9, text: `${y.shared} shared`, base: 10, color: T.muted });
+    });
+    // Under the axis: each year's top shared artists, coloured by family.
+    const rowY0 = H + 10;
+    cmp.years.forEach(y => {
+      y.top_shared.forEach((s, i) => {
+        const a = pseudo(s.name, s.hours[0] + s.hours[1]), p = paint(a);
+        addCircle(x(y) - COLW / 2 + 10, rowY0 + 8 + i * 16, 4, { fill: p.fill, fillOpacity: p.opacity });
+        addLabel({ x: x(y) - COLW / 2 + 18, y: rowY0 + 8 + i * 16, text: s.name, base: 11, align: 'left', fitw: COLW - 24 });
+      });
+      // Pick-ups below the shared list.
+      y.pickups.slice(0, 4).forEach((pu, i) => {
+        addLabel({ x: x(y) - COLW / 2 + 10, y: rowY0 + 8 + (y.top_shared.length + 0.6 + i) * 16, text: `${pu.by} picked up ${pu.name}`, base: 10, align: 'left', color: T.muted, fitw: COLW - 16 });
+      });
+    });
+    addLabel({ x: LEFT, y: 12, text: `${A} & ${B}, year by year. Dot size is shared artists; under each year, the top shared artists, then who picked up whom.`, base: 11, color: T.muted, align: 'left' });
+  }
+
+  // ---- Moments: the small facts, drawn. Four panels from compare.json:
+  //   same-day   every day both people played the same song, on a timeline
+  //   first      who found a shared artist first: both first-play dates on
+  //              one line per artist, with the caveat that Chris's history
+  //              only starts 2018-03, so earlier finds are invisible for him
+  //   duets      shared artists with near-equal hours
+  //   clocks     hours by hour of day, one 24-hour polar chart per person
+  function moments(vis) {
+    const [A, B] = cmp.people;
+    const W = 1200, LEFT = 20;
+    const colA = T.accent, colB = T.fam[0];   // person colours for this view only; family colour is not the point here
+    let y = 0;
+    const title = (t, sub) => { addLabel({ x: LEFT, y, text: t.toUpperCase(), base: 12, weight: 700, color: T.muted, align: 'left' }); if (sub) addLabel({ x: LEFT, y: y + 15, text: sub, base: 11, color: T.muted, align: 'left' }); y += sub ? 36 : 22; };
+    const date = s => new Date(s.length === 7 ? s + '-15' : s);
+
+    // --- same song, same day ---------------------------------------------
+    const sd = cmp.same_day;
+    title(`same song, same day`, `${sd.length} days since ${sd[0]?.date.slice(0, 4) || ''} when you both played the same track`);
+    const x = d3.scaleTime().domain([date(cmp.years[0] ? String(d3.max([+cmp.span[0][0].slice(0, 4), +cmp.span[1][0].slice(0, 4)]) + '-01-01') : '2018-01-01'), new Date(tree.generated)]).range([LEFT + 40, W - 40]);
+    // Lanes first, then the axis is placed to leave room: each moment
+    // takes the lowest lane whose last label ends before this one starts,
+    // and lanes alternate above and below the axis so a busy year does
+    // not tower. Labels are capped at LW px and shrink to fit.
+    const LW = 150, lanes = [], placed = [];
+    sd.forEach(m => {
+      const mx = x(date(m.date)), w = Math.min(LW, 0.56 * 10 * (m.track.length + 2));
+      let lane = lanes.findIndex(end => end < mx - 4);
+      if (lane < 0) { lane = lanes.length; lanes.push(0); }
+      lanes[lane] = mx + w + 6;
+      placed.push({ m, mx, lane });
+    });
+    const half = Math.ceil(lanes.length / 2);
+    const axisY = y + 10 + half * 14 + 6;
+    addLine(x.range()[0], axisY, x.range()[1], axisY, { stroke: T.line });
+    for (const t of x.ticks(d3.timeYear.every(1))) { addLine(x(t), axisY - 4, x(t), axisY + 4, { stroke: T.line }); addLabel({ x: x(t), y: axisY + half * 14 + 22, text: String(t.getFullYear()), base: 11, color: T.muted }); }
+    placed.forEach(({ m, mx, lane }) => {
+      const side = lane % 2 === 0 ? -1 : 1, depth = Math.floor(lane / 2);
+      const my = axisY + side * (12 + depth * 14);
+      addLine(mx, axisY, mx, my, { stroke: T.line });
+      addCircle(mx, my, 3.5, { fill: T.accent, hit: cmpHit(m.track, `<b>${m.track}</b><br>${m.artist}<br>${m.date}`) });
+      addLabel({ x: mx + 6, y: my, text: m.track, base: 10, align: 'left', color: T.fg, fitw: LW });
+    });
+    y = axisY + half * 14 + 48;
+
+    // --- who found it first ------------------------------------------------
+    const firsts = cmp.shared.slice(0, 36).map(r => ({ ...r, da: date(r.first[0]), db: date(r.first[1]) })).sort((p, q) => p.db - q.db);
+    title(`who found it first`, `first play of each shared artist. ${A}'s history starts ${cmp.span[0][0]}, so anything ${B} found before that only looks like hers.`);
+    const fx = d3.scaleTime().domain([d3.min(firsts, f => d3.min([f.da, f.db])), new Date(tree.generated)]).range([LEFT + 200, W - 40]);
+    for (const t of fx.ticks(d3.timeYear.every(1))) { addLine(fx(t), y - 4, fx(t), y + firsts.length * 17, { stroke: T.line, strokeOpacity: 0.5 }); addLabel({ x: fx(t), y: y - 12, text: String(t.getFullYear()), base: 10, color: T.muted }); }
+    // The caveat as a shaded band before Chris's history begins.
+    const startA = date(cmp.span[0][0]);
+    if (startA > fx.domain()[0]) addRect(fx.range()[0], y - 4, fx(startA) - fx.range()[0], firsts.length * 17, { fill: T.muted, fillOpacity: 0.06 });
+    firsts.forEach((f, i) => {
+      const fy = y + 6 + i * 17, xa = fx(f.da), xb = fx(f.db);
+      const who = f.da < f.db ? A : B, lead = Math.round(Math.abs(f.da - f.db) / (365.25 * 864e5) * 10) / 10;
+      addLabel({ x: LEFT + 190, y: fy, text: f.name, base: 11, align: 'right', fitw: 185 });
+      addLine(Math.min(xa, xb), fy, Math.max(xa, xb), fy, { stroke: T.line, strokeWidth: 2 });
+      addCircle(xa, fy, 4, { fill: colA, hit: cmpHit(f.name, `<b>${f.name}</b><br>${A} first ${f.first[0]}, ${B} first ${f.first[1]}<br>${who} by ${lead} years`) });
+      addCircle(xb, fy, 4, { fill: colB, hit: cmpHit(f.name, `<b>${f.name}</b><br>${A} first ${f.first[0]}, ${B} first ${f.first[1]}<br>${who} by ${lead} years`) });
+    });
+    const legY = y + 6 + firsts.length * 17 + 8;
+    addCircle(LEFT + 200, legY, 4, { fill: colA }); addLabel({ x: LEFT + 208, y: legY, text: A, base: 10, color: T.muted, align: 'left' });
+    addCircle(LEFT + 260, legY, 4, { fill: colB }); addLabel({ x: LEFT + 268, y: legY, text: B, base: 10, color: T.muted, align: 'left' });
+    y = legY + 40;
+
+    // --- duets and clocks, side by side --------------------------------------
+    const duetsY = y;
+    title(`duets`, `shared artists where your hours are within 40% of each other`);
+    cmp.duets.slice(0, 20).forEach((d, i) => {
+      const dy = y + i * 17, a = pseudo(d.name, d.hours[0] + d.hours[1]), p = paint(a);
+      addCircle(LEFT + 6, dy, 4, { fill: p.fill, fillOpacity: p.opacity });
+      addLabel({ x: LEFT + 16, y: dy, text: `${d.name}  ·  ${Math.round(d.hours[0])} h / ${Math.round(d.hours[1])} h`, base: 11, align: 'left', fitw: 420 });
+    });
+    // Clocks: two polar area charts, radius = hours in that hour of day.
+    const cx0 = 760, cr = 110;
+    addLabel({ x: cx0 + 150, y: duetsY, text: 'WHEN YOU LISTEN', base: 12, weight: 700, color: T.muted, align: 'left' });
+    addLabel({ x: cx0 + 150, y: duetsY + 15, text: 'hours by hour of day, local time', base: 11, color: T.muted, align: 'left' });
+    [0, 1].forEach(i => {
+      const cx = cx0 + i * 300, cy = duetsY + 60 + cr;
+      const hours = cmp.clock[i], mx = d3.max(hours) || 1;
+      const arc = d3.arc().innerRadius(14).outerRadius(h => 14 + (cr - 14) * h / mx).startAngle((h, k) => k * Math.PI / 12).endAngle((h, k) => (k + 1) * Math.PI / 12).padAngle(0.02);
+      addCircle(cx, cy, cr, { stroke: T.line });
+      hours.forEach((h, k) => {
+        const path = new Path2D(arc(h, k));
+        const t = new Path2D(); const m = new DOMMatrix().translate(cx, cy); t.addPath(path, m);
+        addPath(t, { fill: i === 0 ? colA : colB, fillOpacity: 0.8, hit: cmpHit(String(k), `<b>${[A, B][i]}</b><br>${k}:00 to ${k + 1}:00<br>${Math.round(h)} h all time`), bbox: [cx - cr, cy - cr, cx + cr, cy + cr] });
+      });
+      [0, 6, 12, 18].forEach(k => { const ang = k * Math.PI / 12 - Math.PI / 2; addLabel({ x: cx + Math.cos(ang) * (cr + 12), y: cy + Math.sin(ang) * (cr + 12), text: `${k}:00`, base: 10, color: T.muted }); });
+      addLabel({ x: cx, y: cy + cr + 28, text: `${[A, B][i]} · peak ${d3.maxIndex(hours)}:00`, base: 12, weight: 600 });
+    });
+  }
+
+
+  // ========== account views (need account.json) ============================
+  // The Account Data export is the curation half of a listening life:
+  // playlists with the date each song was added, Spotify's own fandom
+  // labels, and the Wrapped and taste-profile summaries. Three views.
+
+  // Break prose into lines of at most `max` characters at word boundaries,
+  // dropping the **bold** marks Spotify puts in its taste paragraphs.
+  function wrapText(s, max) {
+    const words = (s || '').replace(/\*\*/g, '').split(/\s+/).filter(Boolean), lines = [];
+    let cur = '';
+    for (const w of words) { if (cur && (cur + ' ' + w).length > max) { lines.push(cur); cur = w; } else cur = cur ? cur + ' ' + w : w; }
+    if (cur) lines.push(cur);
+    return lines;
+  }
+  const viewTitle = (y, t, sub) => { addLabel({ x: 20, y, text: t.toUpperCase(), base: 12, weight: 700, color: T.muted, align: 'left' }); if (sub) addLabel({ x: 20, y: y + 15, text: sub, base: 11, color: T.muted, align: 'left' }); return y + (sub ? 40 : 24); };
+
+  // ---- Diary: every playlist as a row, its songs as dots at the date they
+  // were added, coloured by genre family. A dot with a dark ring is an
+  // artist the other person plays (an hour or more). Seasonal playlists
+  // are in bold. Songs added the same day fan out to the right so a
+  // playlist built in one sitting reads as a bead, not a single dot.
+  function diary(vis) {
+    const [A, B] = acct.people;
+    // Two columns, one person each, so 100-odd playlists do not make one
+    // tall strip that fits at a tenth of its size (first draft, 2026-11-03).
+    const COLW = 760, LEFT = 20, LABELW = 190, PITCH = 16;
+    let y = viewTitle(0, 'playlist diary', `${A}: ${acct.diary[0].length} playlists · ${B}: ${acct.diary[1].length} · one row each, songs as dots at the date they were added · ring = the other person plays that artist · bold = seasonal`);
+    const top = y;
+    acct.diary.forEach((rows, i) => {
+      const other = [B, A][i], X0 = LEFT + i * COLW, XL = X0 + LABELW, XT = XL + 14;
+      const x = d3.scaleTime().domain([new Date(rows[0].items[0].d), new Date(acct.generated)]).range([XT, X0 + COLW - 30]);
+      y = top;
+      addLabel({ x: X0, y, text: `${[A, B][i]} · ${rows.length} playlists, ${d3.sum(rows, r => r.n)} songs`, base: 14, weight: 700, align: 'left' });
+      y += 30;
+      const y0 = y;
+      for (const t of x.ticks(d3.timeYear.every(1))) { addLine(x(t), y0 - 8, x(t), y0 + rows.length * PITCH - 6, { stroke: T.line, strokeOpacity: 0.6 }); addLabel({ x: x(t), y: y0 - 14, text: String(t.getFullYear()), base: 10, color: T.muted }); }
+      rows.forEach(pl => {
+        addLabel({ x: XL, y, text: pl.name, base: 11, align: 'right', fitw: LABELW, weight: pl.season ? 700 : 400, color: pl.season ? T.fg : T.muted });
+        const x0 = x(new Date(pl.items[0].d)), x1 = x(new Date(pl.items[pl.items.length - 1].d));
+        addLine(x0, y, Math.max(x1, x0 + 1), y, { stroke: T.line });
+        for (const [d, its] of d3.group(pl.items, it => it.d)) {
+          its.forEach((it, k) => {
+            const a = pseudo(it.a, it.o || 1); a.family = it.f;
+            const p = paint(a);
+            addCircle(x(new Date(d)) + k * 2.6, y, 2.8, { fill: p.fill, fillOpacity: p.opacity, stroke: it.o >= 1 ? T.fg : null, strokeWidth: 1.2,
+              hit: cmpHit(it.t, `<b>${it.t}</b><br>${it.a} · ${it.f}<br>added ${it.d} to "${pl.name}"<br>${other}: ${it.o >= 0.1 ? it.o + ' h' : 'never played'}`) });
+          });
+        }
+        y += PITCH;
+      });
+    });
+  }
+
+  // ---- Marquee: Spotify's own label for each person's relationship to an
+  // artist, for the artists it has labelled for both. A four-by-four grid,
+  // Chris's level across, Meghan's down; names sit in the cell where the
+  // two labels meet. The diagonal is agreement; the corners are one
+  // person's superfan artist the other barely plays.
+  function marquee(vis) {
+    const [A, B] = acct.people, M = acct.marquee;
+    const short = ['super', 'moderate', 'light', 'previously active'];
+    const CW = 300, CH = 220, LEFT = 150, TOP = 80, ROWH = 13, MAXN = Math.floor((CH - 28) / ROWH);
+    viewTitle(0, 'marquee', `Spotify's fandom label for the ${M.shared.length} artists it has labelled for both of you · across: ${A} · down: ${B} · counts in each cell`);
+    const cells = d3.group(M.shared, r => `${r.level[0]},${r.level[1]}`);
+    short.forEach((s, i) => {
+      addLabel({ x: LEFT + CW * (i + 0.5), y: TOP - 12, text: `${A}: ${s}`, base: 12, weight: 600 });
+      addLabel({ x: LEFT - 10, y: TOP + CH * (i + 0.5), text: `${B}: ${s}`, base: 12, weight: 600, align: 'right', fitw: LEFT - 30 });
+    });
+    for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) {
+      const x0 = LEFT + CW * i, y0 = TOP + CH * j, rows = cells.get(`${i},${j}`) || [];
+      addRect(x0, y0, CW, CH, { stroke: T.line, fill: i === j ? T.accent : 'none', fillOpacity: 0.05 });
+      addLabel({ x: x0 + CW - 8, y: y0 + 14, text: String(rows.length), base: 11, color: T.muted, align: 'right' });
+      rows.slice(0, MAXN).forEach((r, k) => {
+        const a = pseudo(r.name, r.hours[0] + r.hours[1]); a.family = r.family;
+        const p = paint(a), ly = y0 + 16 + k * ROWH;
+        addCircle(x0 + 12, ly, 3.5, { fill: p.fill, fillOpacity: p.opacity });
+        addLabel({ x: x0 + 20, y: ly, text: `${r.name}  ${Math.round(r.hours[0])} / ${Math.round(r.hours[1])} h`, base: 10.5, align: 'left', fitw: CW - 44,
+          hit: cmpHit(r.name, `<b>${r.name}</b><br>${A}: ${short[i]} listener, ${r.hours[0]} h<br>${B}: ${short[j]} listener, ${r.hours[1]} h`) });
+      });
+      if (rows.length > MAXN) addLabel({ x: x0 + 20, y: y0 + 16 + MAXN * ROWH, text: `+${rows.length - MAXN} more`, base: 10, color: T.muted, align: 'left' });
+    }
+  }
+
+  // ---- Wrapped: the two 2025 summaries side by side, with Spotify's
+  // prose about each taste, the festival persona, and the last five weeks
+  // from the Sound Capsule (which is where the gift playlist shows up).
+  function wrapped(vis) {
+    const [A, B] = acct.people, COLW = 600, GAP = 50, LEFT = 20;
+    acct.wrapped.forEach((w, i) => {
+      const x0 = LEFT + i * (COLW + GAP);
+      let y = 0;
+      const line = (t, o = {}) => { addLabel({ x: x0, y, text: t, base: 11, align: 'left', fitw: COLW, ...o }); y += 15; };
+      const head = t => { y += 12; addLabel({ x: x0, y, text: t.toUpperCase(), base: 11, weight: 700, color: T.muted, align: 'left' }); y += 18; };
+      addLabel({ x: x0, y, text: `${[A, B][i]} · 2025`, base: 20, weight: 700, align: 'left' }); y += 30;
+      if (!w) { line('no Wrapped file in this export', { color: T.muted }); return; }
+      line(`${w.minutes.toLocaleString()} minutes · ${w.unique_artists.toLocaleString()} artists · ${w.unique_tracks.toLocaleString()} songs · listening age ${w.listening_age}` + (w.popularity != null ? ` · average song popularity ${Math.round(w.popularity * 100)}` : ''), { color: T.muted });
+      head('top artists'); w.top_artists.forEach((a, k) => line(`${k + 1}. ${a}`, { weight: k === 0 ? 600 : 400 }));
+      if (w.top_fan_percentile != null) line(`top ${(w.top_fan_percentile * 100).toFixed(2)}% of ${w.top_artists[0]}'s listeners`, { color: T.muted });
+      head('top songs'); w.top_tracks.forEach((t, k) => line(`${k + 1}. ${t.name}  ·  ${t.count} plays`));
+      head('top albums'); w.top_albums.forEach((a, k) => line(`${k + 1}. ${a}`));
+      if (w.club) { head(`club ${w.club} · ${w.club_role}`); line(w.club_artists.join(' · ')); }
+      head('spotify on your taste'); wrapText(w.identity, 95).forEach(l => line(l));
+      head('when you listen'); wrapText(w.rhythms, 95).forEach(l => line(l));
+      if (w.festival && w.festival.name) { head(`${w.festival.name} lineup match`); line(`${w.festival.persona} · matched ${w.festival.percentile}th percentile · ${w.festival.artists.join(', ')}`); }
+      head('last five weeks (sound capsule)');
+      (acct.capsule[i] || []).forEach(c => line(`${c.date}  ${c.hours} h  ·  ${c.artists.slice(0, 5).map(a => a.name).join(', ')}`));
+    });
+  }
+
+  // ---------- playlist tray ---------------------------------------------------
+  // Seeds are whatever was tapped: a song (mind map rows, side panel), an
+  // artist (+ beside an open node, side panel button) or a genre (legend
+  // chip). Build ranks the tree by closeness to the seeds and fills a list
+  // from the songs we play (tree.json; the other person's from
+  // compare.json) or from the recommender's pool (picks.json), skipping
+  // every song already in a made playlist. Copy gives Spotify links, one
+  // per line, for pasting into a playlist in the desktop app. Saving
+  // straight to Spotify needs a login from the page; not built yet.
+  const tray = document.getElementById('tray'), trayMsg = document.getElementById('traymsg');
+  const seeds = [];                 // {kind, key, name, a?, uri?}
+  const seedIds = new Set();        // artist ids among the seeds, for the ring
+  const build = { who: 'me', pool: 'played', len: '30', list: [] };
+  const ME = () => tree.person || 'me', THEM = () => other()?.person || null;
+  function addSeed(s) {
+    if (seeds.some(x => x.key === s.key)) { trayMsg.textContent = `${s.name} is already a seed`; return; }
+    seeds.push(s); if (s.a) seedIds.add(s.a.id);
+    trayMsg.textContent = ''; syncTray(); draw(true);
+  }
+  function removeSeed(key) {
+    const i = seeds.findIndex(s => s.key === key); if (i < 0) return;
+    const [s] = seeds.splice(i, 1);
+    if (s.a && !seeds.some(x => x.a?.id === s.a.id)) seedIds.delete(s.a.id);
+    syncTray(); draw(true);
+  }
+  const dial = (id, key) => { const el = document.getElementById(id);
+    el.querySelectorAll('button').forEach(b => b.addEventListener('click', () => { build[key] = b.dataset.v; syncTray(); }));
+    return () => el.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === build[key]))); };
+  const syncWho = dial('who', 'who'), syncPool = dial('pool', 'pool'), syncLen = dial('len', 'len');
+  const yearOnly = document.getElementById('yearonly');
+  function syncTray() {
+    tray.hidden = !seeds.length && !build.list.length;
+    d3.select('#seeds').selectAll('button').data(seeds, s => s.key).join('button').attr('class', 'chip').attr('title', 'remove')
+      .text(s => (s.kind === 'genre' ? '◆ ' : s.kind === 'song' ? '♪ ' : '') + s.name).on('click', (e, s) => removeSeed(s.key));
+    document.getElementById('who').hidden = !other();
+    document.querySelector('#who [data-v=me]').textContent = ME(); document.querySelector('#who [data-v=them]').textContent = THEM() || 'them';
+    document.getElementById('pool').hidden = !picks;
+    yearOnly.parentElement.hidden = !state.year; yearOnly.nextElementSibling.textContent = state.year || '';
+    syncWho(); syncPool(); syncLen(); saveTray();
+    d3.select('#result').selectAll('li').data(build.list, t => t.uri).join('li').attr('title', 'remove')
+      .html(t => `<b>${t.name}</b> <span>${t.artist}</span><small>${t.reason}</small>`)
+      .on('click', (e, t) => { build.list = build.list.filter(x => x.uri !== t.uri); syncTray(); });
+  }
+  document.getElementById('trayclear').addEventListener('click', () => { seeds.length = 0; seedIds.clear(); build.list = []; trayMsg.textContent = ''; syncTray(); draw(true); });
+  document.getElementById('buildbtn').addEventListener('click', buildList);
+  document.getElementById('copy').addEventListener('click', async () => {
+    const text = build.list.map(t => 'https://open.spotify.com/track/' + t.uri.split(':').pop()).join('\n') + '\n';
+    try { await navigator.clipboard.writeText(text); trayMsg.textContent = `copied ${build.list.length} links: paste into a playlist in the Spotify desktop app`; }
+    catch (e) { const ta = document.getElementById('clip'); ta.value = text; ta.hidden = false; ta.select(); trayMsg.textContent = 'select all in the box and copy'; }
+  });
+
+  // ---------- Spotify from the page ---------------------------------------
+  // Authorization Code with PKCE: the flow Spotify provides for apps with
+  // no server to hold a secret. The page sends the user to Spotify with a
+  // hashed one-time code, gets an authorization code back on this same
+  // URL, and trades it for tokens with the unhashed code. Tokens live in
+  // localStorage; the refresh token renews them silently. Development Mode
+  // (verified 2026-11-04) refuses to create a playlist but fills one the
+  // user owns, so Save asks for an existing playlist to put the songs in.
+  const SP_TOKEN = 'musictree-spotify', SP_VERIFIER = 'musictree-verifier', SP_USED = 'musictree-used';
+  const SCOPES = 'playlist-read-private playlist-modify-private playlist-modify-public';
+  const redirectUri = () => location.origin + location.pathname.replace(/index\.html$/, '');
+  const b64url = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const spToken = () => { try { return JSON.parse(localStorage.getItem(SP_TOKEN) || 'null'); } catch (e) { return null; } };
+  async function spotifyLogin() {
+    const raw = crypto.getRandomValues(new Uint8Array(48)), verifier = b64url(raw);
+    localStorage.setItem(SP_VERIFIER, verifier);
+    saveTray();                                   // the redirect reloads the page; the list must survive it
+    const challenge = b64url(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier)));
+    const q = new URLSearchParams({ client_id: spotifyId, response_type: 'code', redirect_uri: redirectUri(), scope: SCOPES,
+      code_challenge_method: 'S256', code_challenge: challenge, state: location.hash.slice(1) || 'mindmap' });
+    location.assign('https://accounts.spotify.com/authorize?' + q);
+  }
+  async function tokenRequest(body) {
+    const r = await fetch('https://accounts.spotify.com/api/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ client_id: spotifyId, ...body }) });
+    if (!r.ok) throw new Error('token ' + r.status);
+    const t = await r.json();
+    const saved = { access: t.access_token, refresh: t.refresh_token || spToken()?.refresh, exp: Date.now() + (t.expires_in - 60) * 1000 };
+    localStorage.setItem(SP_TOKEN, JSON.stringify(saved));
+    return saved;
+  }
+  // On the way back from Spotify the URL carries ?code=; trade it, then
+  // put the URL back the way it was (the hash is the view we left from).
+  async function spotifyCallback() {
+    const q = new URLSearchParams(location.search), code = q.get('code');
+    if (!code) return;
+    const verifier = localStorage.getItem(SP_VERIFIER);
+    history.replaceState(null, '', location.pathname + '#' + (q.get('state') || 'mindmap'));
+    if (!verifier) return;
+    try { await tokenRequest({ grant_type: 'authorization_code', code, redirect_uri: redirectUri(), code_verifier: verifier }); trayMsg.textContent = 'signed in to Spotify'; }
+    catch (e) { trayMsg.textContent = 'Spotify sign-in failed: ' + e.message; }
+    localStorage.removeItem(SP_VERIFIER);
+  }
+  async function spotifyFetch(path, opts = {}) {
+    let t = spToken();
+    if (!t) throw new Error('not signed in');
+    if (Date.now() > t.exp) t = await tokenRequest({ grant_type: 'refresh_token', refresh_token: t.refresh });
+    const r = await fetch('https://api.spotify.com/v1/' + path, { ...opts, headers: { Authorization: 'Bearer ' + t.access, 'Content-Type': 'application/json', ...(opts.headers || {}) } });
+    if (r.status === 401) { localStorage.removeItem(SP_TOKEN); throw new Error('signed out by Spotify; sign in again'); }
+    if (!r.ok) throw new Error(`${r.status} on ${path.split('?')[0]}` + (r.status === 403 ? ' (Development Mode or scope)' : ''));
+    return r.status === 204 ? null : r.json();
+  }
+  const saver = document.getElementById('saver'), target = document.getElementById('target');
+  async function openSaver() {
+    if (!spotifyId) { trayMsg.textContent = 'no spotify.json beside the page: run deploy'; return; }
+    if (!build.list.length) { trayMsg.textContent = 'build a list first'; return; }
+    if (!spToken()) return spotifyLogin();
+    trayMsg.textContent = 'reading your playlists…';
+    try {
+      const me = (await spotifyFetch('me')).id;
+      const mine = [];
+      for (let url = 'me/playlists?limit=50'; url;) { const page = await spotifyFetch(url); mine.push(...page.items.filter(p => p.owner.id === me)); url = page.next ? page.next.replace('https://api.spotify.com/v1/', '') : null; }
+      if (!mine.length) { trayMsg.textContent = 'you own no playlists yet: make an empty private one in Spotify, then try again'; return; }
+      d3.select(target).selectAll('option').data(mine, p => p.id).join('option').attr('value', p => p.id).text(p => `${p.name}${p.public ? ' (public)' : ''} · ${p.tracks?.total ?? ''}`);
+      saver.hidden = false;
+      trayMsg.textContent = 'Spotify blocks making a playlist from here, so pick one of yours (an empty private one is the usual choice)';
+    } catch (e) { trayMsg.textContent = 'Spotify: ' + e.message; }
+  }
+  async function saveTo(replace) {
+    const id = target.value, uris = build.list.map(t => t.uri), name = document.getElementById('plname').value.trim();
+    if (!id || !uris.length) return;
+    trayMsg.textContent = 'saving…';
+    try {
+      for (let i = 0; i < uris.length; i += 100) {
+        const method = replace && i === 0 ? 'PUT' : 'POST';
+        await spotifyFetch(`playlists/${id}/items`, { method, body: JSON.stringify({ uris: uris.slice(i, i + 100) }) });
+      }
+      let renamed = '';
+      if (name) { try { await spotifyFetch(`playlists/${id}`, { method: 'PUT', body: JSON.stringify({ name }) }); renamed = `, renamed to “${name}”`; } catch (e) { renamed = ' (renaming was refused; do it in Spotify)'; } }
+      // Remember what went out, so the next build skips it like the ledger does.
+      const used = new Set(JSON.parse(localStorage.getItem(SP_USED) || '[]')); uris.forEach(u => used.add(u));
+      localStorage.setItem(SP_USED, JSON.stringify([...used]));
+      trayMsg.textContent = `${uris.length} songs ${replace ? 'now make up' : 'added to'} “${target.selectedOptions[0].text.split(' · ')[0]}”${renamed}`;
+      saver.hidden = true;
+    } catch (e) { trayMsg.textContent = 'Spotify: ' + e.message; }
+  }
+  document.getElementById('save').addEventListener('click', openSaver);
+  document.getElementById('saveadd').addEventListener('click', () => saveTo(false));
+  document.getElementById('savereplace').addEventListener('click', () => saveTo(true));
+  document.getElementById('splogout').addEventListener('click', () => { localStorage.removeItem(SP_TOKEN); saver.hidden = true; trayMsg.textContent = 'Spotify login forgotten on this device'; });
+
+  // The tray survives a reload (and the sign-in round trip): seeds by
+  // artist id, the built list whole. Seeds from the other person's tree
+  // are dropped on restore, since ids are per tree.
+  const TRAY_KEY = 'musictree-tray';
+  function saveTray() {
+    try { localStorage.setItem(TRAY_KEY, JSON.stringify({ seeds: seeds.map(s => ({ kind: s.kind, key: s.key, name: s.name, aid: s.a?.id, uri: s.uri })), list: build.list, who: build.who, pool: build.pool, len: build.len })); } catch (e) {}
+  }
+  function restoreTray() {
+    let t; try { t = JSON.parse(localStorage.getItem(TRAY_KEY) || 'null'); } catch (e) {}
+    if (!t) return;
+    for (const s of t.seeds || []) { const a = s.aid ? byId.get(s.aid) : null; if (s.aid && !a) continue; seeds.push({ ...s, a }); if (a) seedIds.add(a.id); }
+    build.list = t.list || []; build.who = t.who || build.who; build.pool = t.pool || build.pool; build.len = t.len || build.len;
+  }
+
+  // Closeness of every tree artist to the seeds: 1 for a seed, 0.6 one
+  // link away (parent, child, co-listening partner), 0.25 two away, 0.5
+  // for sitting in a seeded genre. The best reason is kept for the list.
+  function proximity() {
+    const score = new Map(), why = new Map();
+    const bump = (id, v, reason) => { if ((score.get(id) || 0) < v) { score.set(id, v); why.set(id, reason); } };
+    const genres = new Set(seeds.filter(s => s.kind === 'genre').map(s => s.name));
+    for (const a of artists) if (genres.has(a.family)) bump(a.id, 0.5, a.family);
+    for (const s of seeds) {
+      if (!s.a) continue;
+      bump(s.a.id, 1, 'seed');
+      for (const n1 of nbr.get(s.a.id) || []) {
+        if (n1 === s.a.id) continue;
+        bump(n1, 0.6, `next to ${s.a.name}`);
+        for (const n2 of nbr.get(n1) || []) if (n2 !== s.a.id) bump(n2, 0.25, `near ${s.a.name}`);
+      }
+    }
+    return { score, why };
+  }
+  function buildList() {
+    if (!seeds.length) { trayMsg.textContent = 'tap a song, an artist or a genre first'; return; }
+    const { score, why } = proximity();
+    const ok = a => !(state.year && yearOnly.checked) || (a.years?.[state.year] > 0);
+    const rankedA = artists.filter(a => score.has(a.id) && ok(a)).sort((p, q) => score.get(q.id) - score.get(p.id) || w(q) - w(p));
+    const usedSet = new Set([...(picks?.used || []), ...JSON.parse(localStorage.getItem(SP_USED) || '[]')]), taken = new Set(), out = [];
+    const push = (track, artist, reason) => {
+      if (!track?.uri || usedSet.has(track.uri) || taken.has(track.uri)) return false;
+      taken.add(track.uri); out.push({ name: track.name, artist, uri: track.uri, reason }); return true;
+    };
+    const me = ME(), them = THEM();
+    for (const s of seeds) if (s.kind === 'song') push({ name: s.name, uri: s.uri }, s.a.name, 'you picked it');
+    // One source per generator; each yields the next song by the next
+    // artist in closeness order, several passes deep, so the list is
+    // round-robin across sources and no artist can fill it alone.
+    function* played(person) {
+      for (let pass = 0; pass < 3; pass++) for (const a of rankedA) {
+        if (person === me) { const s = a.songs[pass]; if (s) yield [s, a.name, `${why.get(a.id)} · ${me} plays ${a.name} ${Math.round(a.weight)} h`]; }
+        else { const o = otherIndex().get(a.name), s = o?.weight >= 1 ? o.songs?.[pass] : null; if (s) yield [s, a.name, `${why.get(a.id)} · ${them} plays ${a.name} ${Math.round(o.weight)} h`]; }
+      }
+    }
+    function* fresh(person) {
+      const pool = person === 'both' ? picks.together : picks.for[person] || [];
+      const nameScore = new Map(artists.filter(a => score.has(a.id)).map(a => [a.name, score.get(a.id)]));
+      const genres = new Set(seeds.filter(s => s.kind === 'genre').map(s => s.name));
+      // A pick scores by how close its anchors are to the seeds; the pool's
+      // own order only breaks ties.
+      const scored = pool.map((p, i) => ({ p, s: d3.sum(p.via, v => nameScore.get(v) || 0) + (genres.has(p.family) ? 0.5 : 0) - 0.1 * i / pool.length }))
+        .filter(x => x.s > 0).sort((x, y) => y.s - x.s);
+      for (let pass = 0; pass < 2; pass++) for (const { p } of scored) {
+        const t = p.tracks[pass]; if (!t) continue;
+        const near = p.via.filter(v => nameScore.has(v)).slice(0, 2).join(', ') || p.via[0];
+        yield [t, p.artist, `new to ${person} · near ${near}`];
+      }
+    }
+    const whoList = build.who === 'both' && them ? [me, them] : [build.who === 'them' && them ? them : me];
+    const gens = [];
+    if (build.pool !== 'new') for (const p of whoList) gens.push(played(p));
+    if (build.pool !== 'played' && picks) { for (const p of whoList) gens.push(fresh(p)); if (build.who === 'both') gens.push(fresh('both')); }
+    let live = gens;
+    while (out.length < +build.len && live.length) {
+      live = live.filter(g => { if (out.length >= +build.len) return false; for (;;) { const n = g.next(); if (n.done) return false; if (push(...n.value)) return true; } });
+    }
+    build.list = out;
+    trayMsg.textContent = out.length < +build.len ? `${out.length} songs: the seeds ran out before ${build.len}` : `${out.length} songs`;
+    syncTray();
+  }
+
+  // ---------- draw ----------------------------------------------------------
+  const VIEWS = { mindmap, radial, bubbles, genres, river, duo, past, moments, diary, marquee, wrapped };
+  function draw(keep = false) {
+    setHues(state.view === 'bubbles' || (state.view === 'river' && ['stacked', 'merged'].includes(state.riverby)) ? HUES_BUBBLES : HUES_TREE);
+    const maxEff = d3.max(artists, w) || 1;
+    rScale.domain([0, maxEff]); strokeScale.domain([0, maxEff]);
+    scene.pos = null; state.hover = null;
+    syncView(); syncAge(); syncColour(); syncRiver(); syncOverlay(); showControls(); drawLegend(); remember();
+    nout.textContent = state.n;
+    scene.shapes = []; scene.labels = []; scene.bbox = null;
+    VIEWS[state.view](visibleSet(state.n));
+    showPanel(state.view !== 'mindmap' && state.selected ? byId.get(state.selected) : null);
+    syncTray();
+    size();
+    if (keep) render(); else if (scrolls()) fitWidth(); else fit();
+  }
+  usePerson(+state.person || 0);
+  restoreTray();
+  await spotifyCallback();
+  draw();
+})();
+</script>
+</body>
+</html>
