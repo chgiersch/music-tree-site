@@ -176,6 +176,12 @@
   #bar h1 .mini, #tray .mini { font: inherit; font-size: 12px; padding: 3px 9px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--fg); cursor: pointer; }
   #tray .chip { font: inherit; font-size: 12px; padding: 2px 9px; border: 1px solid var(--accent); border-radius: 12px; background: transparent; color: var(--fg); cursor: pointer; }
   #tray .chip:hover, #result li:hover b { text-decoration: line-through; }
+  /* Vibe chips: a mood with a who-bar under the name (left share is the
+     first person, right the second, in their two colours). */
+  #vibelabel { color: var(--muted); }
+  #tray .vibe { font: inherit; font-size: 12px; padding: 3px 9px 4px; border: 1px solid var(--line); border-radius: 12px; background: transparent; color: var(--fg); cursor: pointer; display: inline-flex; flex-direction: column; gap: 3px; align-items: stretch; }
+  #tray .vibe:hover { border-color: var(--accent); text-decoration: none; }
+  #tray .vibe i { display: block; height: 3px; border-radius: 2px; background: linear-gradient(90deg, var(--accent) var(--a), #ff5fa2 var(--a)); }
   #tray label, #saver span { color: var(--muted); }
   #tray select, #tray input[type=text] { font: inherit; font-size: 12px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--fg); max-width: 240px; }
   #traymsg, #trayhint { color: var(--muted); }
@@ -200,6 +206,7 @@
     <button data-view="genres">Genres</button>
     <button data-view="river">River</button>
     <button data-view="energy" title="Needs energy.json">Energy</button>
+    <button data-view="vibes" title="Needs vibes.json">Vibes</button>
     <button data-view="duo" title="Needs compare.json">Two of us</button>
     <button data-view="past" title="Needs compare.json">Past</button>
     <button data-view="moments" title="Needs compare.json">Moments</button>
@@ -263,6 +270,7 @@
 <div id="tip"></div>
 <div id="tray">
   <div class="row"><b>Playlist</b><span id="trayhint">tap a song in an open artist's ladder, the + beside the artist, or a genre chip in the legend, then Build</span><span id="seeds" class="row"></span><span id="traymsg"></span><button type="button" id="trayclear" class="mini">clear</button></div>
+  <div class="row" id="viberow" hidden><span id="vibelabel">Vibes</span><span id="vibes" class="row"></span></div>
   <div class="row" id="dials">
     <div class="seg" id="who" role="group" aria-label="Whose songs"><button data-v="me">me</button><button data-v="them">them</button><button data-v="both">both</button></div>
     <div class="seg" id="pool" role="group" aria-label="Familiar or new"><button data-v="played">songs we play</button><button data-v="new">new to us</button><button data-v="mix">mix</button></div>
@@ -298,7 +306,7 @@
 <script>
 (async function () {
   // ---------- load ---------------------------------------------------------
-  let tree, tree2 = null, cmp = null, acct = null, picks = null, spotifyId = null, energy = null;
+  let tree, tree2 = null, cmp = null, acct = null, picks = null, spotifyId = null, energy = null, vibes = null;
 
   // ----- encrypted data (the deployed copy) --------------------------------
   // Locally the pipeline writes plain tree.json next to this file. On GitHub
@@ -393,6 +401,8 @@
     try { picks = await load('picks'); } catch (e) {}
     // energy.json scores every artist from chill to charged (`energy`).
     try { energy = await load('energy'); } catch (e) {}
+    // vibes.json is the list of moods cut from both libraries (`vibes`).
+    try { vibes = await load('vibes'); } catch (e) {}
     // spotify.json holds the app's client id (public by design) for the
     // Save button's login; `deploy` writes it. Missing means no Save.
     try { const r = await fetch('spotify.json', { cache: 'no-cache' }); if (r.ok) spotifyId = (await r.json()).client_id; } catch (e) {}
@@ -479,7 +489,7 @@
   }
 
   // ---------- controls and state --------------------------------------------
-  const VIEW_NAMES = ['mindmap', 'radial', 'bubbles', 'genres', 'river', 'energy', 'duo', 'past', 'moments', 'diary', 'marquee', 'wrapped'];
+  const VIEW_NAMES = ['mindmap', 'radial', 'bubbles', 'genres', 'river', 'energy', 'vibes', 'duo', 'past', 'moments', 'diary', 'marquee', 'wrapped'];
   const state = { person: 0, view: 'mindmap', n: 24, age: 'desaturate', colour: 'genre', riverby: 'genre', riverFamily: null,
                   sunRoot: null, text: 1, open: new Set(), selected: null, year: null, overlay: 'off', hover: null, compact: false };
   try { Object.assign(state, JSON.parse(localStorage.getItem('musictree-state') || '{}'), { open: new Set(), selected: null, riverFamily: null, sunRoot: null, year: null, hover: null }); } catch (e) {}
@@ -566,14 +576,14 @@
     nctl: ['mindmap', 'radial', 'bubbles', 'genres', 'energy', 'duo'],      // plus river by artist
     fadectl: ['mindmap', 'radial', 'bubbles', 'genres', 'energy'],         // plus river by artist; off when colour is era or chill
     textctl: VIEW_NAMES,
-    colourctl: ['mindmap', 'radial', 'bubbles', 'genres', 'river', 'energy', 'duo', 'diary', 'marquee'],
+    colourctl: ['mindmap', 'radial', 'bubbles', 'genres', 'river', 'energy', 'vibes', 'duo', 'diary', 'marquee'],
     riverctl: ['river'],
     yearctl: ['mindmap', 'radial', 'bubbles', 'genres'],
     overlayctl: ['mindmap', 'radial', 'bubbles'],
     personctl: ['mindmap', 'radial', 'bubbles', 'genres'],               // plus river by genre or artist
     zoomctl: VIEW_NAMES,
     findctl: ['mindmap', 'radial', 'bubbles', 'genres', 'energy'],
-    legend: ['mindmap', 'radial', 'bubbles', 'genres', 'river', 'energy', 'duo', 'diary', 'marquee'],
+    legend: ['mindmap', 'radial', 'bubbles', 'genres', 'river', 'energy', 'vibes', 'duo', 'diary', 'marquee'],
   };
   // Audited 2026-11-04: a control shows only where it changes the drawing.
   function showControls() {
@@ -595,6 +605,7 @@
   if (trees.length > 1) { people.forEach((n, i) => { document.querySelector(`[data-person="${i}"]`).textContent = n; }); if (state.riverby === 'both') state.riverby = 'stacked'; }
   else { state.person = 0; state.overlay = 'off'; document.querySelectorAll('[data-riverby=stacked],[data-riverby=merged]').forEach(b => { b.disabled = true; }); if (['both', 'stacked', 'merged'].includes(state.riverby)) state.riverby = 'genre'; }
   if (!isExport) document.querySelector('[data-view=river]').disabled = true;  // needs hours per year
+  if (!vibes) { document.querySelector('[data-view=vibes]').disabled = true; if (state.view === 'vibes') state.view = 'mindmap'; }
   if (!energy) { document.querySelector('[data-view=energy]').disabled = true; document.querySelector('[data-colour=chill]').disabled = true;
     if (state.view === 'energy') state.view = 'mindmap'; if (state.colour === 'chill') state.colour = 'genre'; }
   if (!cmp) { document.querySelectorAll('[data-view=duo],[data-view=past],[data-view=moments]').forEach(b => { b.disabled = true; }); if (['duo', 'past', 'moments'].includes(state.view)) state.view = 'mindmap'; }
@@ -1349,6 +1360,37 @@
     scene.pos = pos;
   }
 
+  // ========== view: vibes ==================================================
+  // One card per vibe: the name, a who-bar (first person's share in the
+  // accent, the second's in pink), the hours, a small energy strip of its
+  // artists, and the tags. Tap a card to seed the tray with it and build.
+  function vibesView(vis) {
+    const CW = 290, CH = 130, GAP = 16, COLS = 4, PAD = 12;
+    const [A, B] = vibes.people;
+    vibes.vibes.forEach((v, i) => {
+      const x0 = (i % COLS) * (CW + GAP), y0 = Math.floor(i / COLS) * (CH + GAP);
+      const hA = v.hours[A] || 0, hB = v.hours[B] || 0, share = hA / ((hA + hB) || 1);
+      addRect(x0, y0, CW, CH, { fill: T.surface, stroke: T.line, hit: { data: v.key,
+        hover: e => tipAt(e, `<b>${v.name}</b><br>${v.artists.length} artists · ${v.who === 'both' ? 'both of you' : v.who}<br>tap to seed a playlist`), click: () => applyVibe(v) } });
+      addLabel({ x: x0 + PAD, y: y0 + 18, text: v.name, base: 15, weight: 700, align: 'left', fitw: CW - 2 * PAD });
+      addLabel({ x: x0 + CW - PAD, y: y0 + 18, text: v.band, base: 11, color: T.muted, align: 'right' });
+      // Who-bar.
+      addRect(x0 + PAD, y0 + 30, (CW - 2 * PAD) * share, 4, { fill: T.accent });
+      addRect(x0 + PAD + (CW - 2 * PAD) * share, y0 + 30, (CW - 2 * PAD) * (1 - share), 4, { fill: OTHER });
+      addLabel({ x: x0 + PAD, y: y0 + 44, text: `${A} ${hA} h`, base: 10, color: T.muted, align: 'left' });
+      addLabel({ x: x0 + CW - PAD, y: y0 + 44, text: `${B} ${hB} h`, base: 10, color: T.muted, align: 'right' });
+      // Energy strip: each artist a dot from chill to charged, sized by its hours.
+      const sx = d3.scaleLinear().domain([0, 1]).range([x0 + PAD, x0 + CW - PAD]), maxH = d3.max(v.artists, a => d3.sum(Object.values(a.hours))) || 1;
+      addLine(x0 + PAD, y0 + 72, x0 + CW - PAD, y0 + 72, { stroke: T.line });
+      for (const a of v.artists) {
+        const art = treeIndex.map(ix => ix.get(a.name)).find(Boolean), pnt = art ? paint(art) : { fill: famColor.get(v.family) || T.other, opacity: 1 };
+        addCircle(sx(a.charge), y0 + 72, 2 + 6 * Math.sqrt(d3.sum(Object.values(a.hours)) / maxH), { fill: pnt.fill, fillOpacity: 0.85, hit: { data: a.name, hover: e => tipAt(e, `<b>${a.name}</b><br>charge ${a.charge.toFixed(2)}<br>` + Object.entries(a.hours).map(([p, h]) => `${p} ${h} h`).join(' · ')) } });
+      }
+      addLabel({ x: x0 + PAD, y: y0 + 92, text: v.artists.slice(0, 3).map(a => a.name).join(', '), base: 11, align: 'left', fitw: CW - 2 * PAD });
+      addLabel({ x: x0 + PAD, y: y0 + 110, text: v.tags.join(' · '), base: 10, color: T.muted, align: 'left', fitw: CW - 2 * PAD });
+    });
+  }
+
   // ========== two-person views (need compare.json) ========================
   // Families for the second person's artists come from compare.json, so
   // colour works the same way; hours are the person's own.
@@ -1914,6 +1956,31 @@
     build.list = t.list || []; build.who = t.who || build.who; build.pool = t.pool || build.pool; build.len = t.len || build.len; build.chill = t.chill || build.chill;
   }
 
+  // Vibe chips in the tray. Tapping one replaces the seeds with the vibe's
+  // artists (looked up in whichever tree holds them), points the who and
+  // energy dials at the vibe, and builds, so a mood is one tap.
+  function applyVibe(v) {
+    seeds.length = 0; seedIds.clear();
+    for (const name of v.seeds) {
+      const a = treeIndex.map(ix => ix.get(name)).find(Boolean);
+      if (!a) continue;
+      seeds.push({ kind: 'artist', key: 'v:' + v.key + ':' + a.id, name: a.name, a }); seedIds.add(a.id);
+    }
+    build.who = v.who === 'both' ? 'both' : v.who === ME() ? 'me' : 'them';
+    build.chill = v.band === 'mellow' ? 'mellow' : v.band === 'up' ? 'up' : 'any';
+    build.pool = 'played';      // a mood starts from songs you play; "new to us" is one dial away
+    trayMsg.textContent = `${v.name}: ${seeds.length} artists seeded`;
+    syncTray(); draw(true); buildList();
+  }
+  if (vibes) {
+    const [A, B] = vibes.people;
+    document.getElementById('viberow').hidden = false;
+    d3.select('#vibes').selectAll('button').data(vibes.vibes, v => v.key).join('button').attr('class', 'vibe')
+      .attr('title', v => `${v.who === 'both' ? 'both of you' : v.who} · ${v.tags.slice(0, 3).join(', ')}`)
+      .html(v => `${v.name}<i style="--a:${Math.round(100 * (v.hours[A] || 0) / (((v.hours[A] || 0) + (v.hours[B] || 0)) || 1))}%"></i>`)
+      .on('click', (e, v) => applyVibe(v));
+  }
+
   // Closeness of every tree artist to the seeds: 1 for a seed, 0.6 one
   // link away (parent, child, co-listening partner), 0.25 two away, 0.5
   // for sitting in a seeded genre. The best reason is kept for the list.
@@ -1986,7 +2053,7 @@
   }
 
   // ---------- draw ----------------------------------------------------------
-  const VIEWS = { mindmap, radial, bubbles, genres, river, energy: energyView, duo, past, moments, diary, marquee, wrapped };
+  const VIEWS = { mindmap, radial, bubbles, genres, river, energy: energyView, vibes: vibesView, duo, past, moments, diary, marquee, wrapped };
   // An artist by id from whichever tree holds it; the energy view shows both.
   const anyArtist = id => byId.get(id) || trees.map(t => t.artists.find(a => a.id === id)).find(Boolean);
   function draw(keep = false) {
