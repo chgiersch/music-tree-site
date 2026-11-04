@@ -1,4 +1,4 @@
-# Music Tree, locked copy
+# Music Tree Mixtape, locked copy
 
 The published copy of a private listening-history page. `index.html` is the
 viewer; the `.enc` files are the data, encrypted in the browser's own
