@@ -147,7 +147,7 @@
   #tray .chip:hover, #result li:hover b { text-decoration: line-through; }
   #tray label, #saver span { color: var(--muted); }
   #tray select, #tray input[type=text] { font: inherit; font-size: 12px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--fg); max-width: 240px; }
-  #traymsg { color: var(--muted); }
+  #traymsg, #trayhint { color: var(--muted); }
   #result { margin: 0; padding: 0 0 0 22px; columns: 2; column-gap: 28px; }
   #result li { break-inside: avoid; padding: 2px 0; cursor: pointer; }
   #result li span { color: var(--muted); }
@@ -222,9 +222,9 @@
   <aside id="panel" hidden></aside>
 </div>
 <div id="tip"></div>
-<div id="tray" hidden>
-  <div class="row"><b>Playlist</b><span id="seeds" class="row"></span><span id="traymsg"></span><button type="button" id="trayclear" class="mini">clear</button></div>
-  <div class="row">
+<div id="tray">
+  <div class="row"><b>Playlist</b><span id="trayhint">tap a song in an open artist's ladder, the + beside the artist, or a genre chip in the legend, then Build</span><span id="seeds" class="row"></span><span id="traymsg"></span><button type="button" id="trayclear" class="mini">clear</button></div>
+  <div class="row" id="dials">
     <div class="seg" id="who" role="group" aria-label="Whose songs"><button data-v="me">me</button><button data-v="them">them</button><button data-v="both">both</button></div>
     <div class="seg" id="pool" role="group" aria-label="Familiar or new"><button data-v="played">songs we play</button><button data-v="new">new to us</button><button data-v="mix">mix</button></div>
     <div class="seg" id="len" role="group" aria-label="Length"><button data-v="20">20</button><button data-v="30">30</button><button data-v="60">60</button></div>
@@ -1624,7 +1624,8 @@
   const syncWho = dial('who', 'who'), syncPool = dial('pool', 'pool'), syncLen = dial('len', 'len');
   const yearOnly = document.getElementById('yearonly');
   function syncTray() {
-    tray.hidden = !seeds.length && !build.list.length;
+    const empty = !seeds.length && !build.list.length;
+    document.getElementById('trayhint').hidden = !empty; document.getElementById('dials').hidden = empty; document.getElementById('trayclear').hidden = empty;
     d3.select('#seeds').selectAll('button').data(seeds, s => s.key).join('button').attr('class', 'chip').attr('title', 'remove')
       .text(s => (s.kind === 'genre' ? '◆ ' : s.kind === 'song' ? '♪ ' : '') + s.name).on('click', (e, s) => removeSeed(s.key));
     document.getElementById('who').hidden = !other();
