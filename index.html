@@ -4,6 +4,15 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Mixtape: Music Tree</title>
+<meta name="description" content="Where our music grows together. Two listening histories as one tree, and a mixtape from it.">
+<meta name="theme-color" content="#15141c">
+<link rel="icon" type="image/png" sizes="32x32" href="brand/icon-32.png">
+<link rel="icon" type="image/png" sizes="64x64" href="brand/icon-64.png">
+<link rel="apple-touch-icon" href="brand/icon-180.png">
+<link rel="manifest" href="brand/manifest.webmanifest">
+<meta property="og:title" content="Mixtape: Music Tree">
+<meta property="og:description" content="Where our music grows together.">
+<meta property="og:image" content="https://chgiersch.github.io/music-tree-site/brand/og.png">
 <!--
   Music Tree – the page. Reads site/tree.json (written by the pipeline) and
   draws Chris's listening as one of five views, switchable in the bar:
@@ -83,7 +92,15 @@
   #bar { flex: none; z-index: 2; background: var(--bg); border-bottom: 1px solid var(--line); padding: 6px 12px 0; }
   #bar .row { display: flex; align-items: center; gap: 8px 14px; overflow-x: auto; padding-bottom: 6px; scrollbar-width: none; }
   #bar .row::-webkit-scrollbar { display: none; }
-  #bar h1 { font-size: 15px; font-weight: 600; margin: 0; white-space: nowrap; }
+  #bar h1 { font-size: 15px; font-weight: 600; margin: 0; white-space: nowrap; display: inline-flex; align-items: center; gap: 8px; }
+  .mark { width: 28px; height: 28px; border-radius: 7px; display: block; }
+  .wordmark { display: inline-flex; flex-direction: column; line-height: 1; }
+  .wordmark b { font-family: "Didot", "Bodoni 72", "Playfair Display", Georgia, serif; font-weight: 400; font-size: 19px; letter-spacing: -0.01em; color: var(--fg); }
+  .wordmark small { font-size: 7.5px; font-weight: 600; letter-spacing: 0.24em; text-transform: uppercase; color: var(--accent); margin-top: 3px; }
+  #lock .mark { width: 84px; height: 84px; border-radius: 20px; margin: 0 auto 10px; }
+  #lock .wordmark { align-items: center; margin-bottom: 4px; }
+  #lock .wordmark b { font-size: 36px; } #lock .wordmark small { font-size: 12px; margin-top: 6px; }
+  #lock .tagline { font-family: "Didot", "Bodoni 72", "Playfair Display", Georgia, serif; font-style: italic; font-size: 16px; color: var(--fg); text-align: center; margin: 0 0 10px; }
   .ctl, .seg { flex: none; white-space: nowrap; }
   @media (min-width: 700px) { #bar { padding: 8px 16px 2px; } #bar .row { flex-wrap: wrap; overflow: visible; gap: 8px 20px; } #bar h1 { font-size: 16px; } }
   .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
@@ -203,7 +220,7 @@
 <body>
 <div id="bar">
   <div class="row">
-    <h1>Mixtape: Music Tree <button type="button" id="help" class="mini" title="How to use this" aria-expanded="false">i</button></h1>
+    <h1><img class="mark" src="brand/icon-64.png" alt=""><span class="wordmark"><b>Mixtape:</b><small>Music Tree</small></span> <button type="button" id="help" class="mini" title="How to use this" aria-expanded="false">i</button></h1>
     <div id="helpcard" hidden></div>
   <div class="seg" id="views" role="group" aria-label="View">
     <button data-view="mindmap">Mind map</button>
@@ -300,7 +317,9 @@
 <div id="msg" hidden></div>
 <div id="lock" hidden>
   <form>
-    <h1>Mixtape: Music Tree</h1>
+    <img class="mark" src="brand/icon-192.png" alt="">
+    <span class="wordmark"><b>Mixtape:</b><small>Music Tree</small></span>
+    <p class="tagline">Where our music grows together.</p>
     <p>The listening histories behind this page are locked. Type the passphrase once per device.</p>
     <input type="password" autocomplete="current-password" placeholder="passphrase" autofocus>
     <button type="submit">Unlock</button>
