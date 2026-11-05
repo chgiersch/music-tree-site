@@ -182,6 +182,12 @@
   #tray .vibe { font: inherit; font-size: 12px; padding: 3px 9px 4px; border: 1px solid var(--line); border-radius: 12px; background: transparent; color: var(--fg); cursor: pointer; display: inline-flex; flex-direction: column; gap: 3px; align-items: stretch; }
   #tray .vibe:hover { border-color: var(--accent); text-decoration: none; }
   #tray .vibe i { display: block; height: 3px; border-radius: 2px; background: linear-gradient(90deg, var(--accent) var(--a), #ff5fa2 var(--a)); }
+  /* The special one: a shimmering border in the Sparkle hues, so it is the
+     chip that gets tapped first. */
+  #tray .vibe.special { border: 0; padding: 2px; background: linear-gradient(120deg, var(--sp1), var(--sp2), var(--sp3), var(--sp5), var(--sp1)); background-size: 300% 300%; animation: shimmer 4s ease infinite; }
+  #tray .vibe.special > span { display: block; padding: 3px 10px 4px; border-radius: 10px; background: var(--surface); font-weight: 600; }
+  #tray .vibe.special i { background: linear-gradient(90deg, var(--sp1), var(--sp3)); }
+  @keyframes shimmer { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }
   #tray label, #saver span { color: var(--muted); }
   #tray select, #tray input[type=text] { font: inherit; font-size: 12px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); color: var(--fg); max-width: 240px; }
   #traymsg, #trayhint { color: var(--muted); }
@@ -283,7 +289,7 @@
   </div>
   <div class="row" id="saver" hidden>
     <span>into</span><select id="target"></select>
-    <input id="plname" type="text" placeholder="rename it (optional)" style="width:180px">
+    <input id="plname" type="text" placeholder="name it (optional)" style="width:180px">
     <button type="button" id="saveadd" class="mini" title="Append the songs to the chosen playlist">Add songs</button>
     <button type="button" id="savereplace" class="mini" title="Replace everything in the chosen playlist">Replace it</button>
     <button type="button" id="splogout" class="mini" title="Forget the Spotify login on this device">sign out</button>
@@ -295,7 +301,7 @@
 <div id="lock" hidden>
   <form>
     <h1>Mixtape: Music Tree</h1>
-    <p>Two listening histories live behind this page. Type the passphrase once per device.</p>
+    <p>The listening histories behind this page are locked. Type the passphrase once per device.</p>
     <input type="password" autocomplete="current-password" placeholder="passphrase" autofocus>
     <button type="submit">Unlock</button>
     <p class="err"></p>
@@ -1370,7 +1376,7 @@
     vibes.vibes.forEach((v, i) => {
       const x0 = (i % COLS) * (CW + GAP), y0 = Math.floor(i / COLS) * (CH + GAP);
       const hA = v.hours[A] || 0, hB = v.hours[B] || 0, share = hA / ((hA + hB) || 1);
-      addRect(x0, y0, CW, CH, { fill: T.surface, stroke: T.line, hit: { data: v.key,
+      addRect(x0, y0, CW, CH, { fill: T.surface, stroke: v.special ? T.sp[0] : T.line, strokeWidth: v.special ? 2.5 : 1, hit: { data: v.key,
         hover: e => tipAt(e, `<b>${v.name}</b><br>${v.artists.length} artists · ${v.who === 'both' ? 'both of you' : v.who} · ${v.tags.slice(0, 3).join(', ')}<br>tap to seed a playlist`), click: () => applyVibe(v) } });
       addLabel({ x: x0 + PAD, y: y0 + 18, text: v.name, base: 15, weight: 700, align: 'left', fitw: CW - 2 * PAD });
       addLabel({ x: x0 + CW - PAD, y: y0 + 18, text: v.band, base: 11, color: T.muted, align: 'right' });
@@ -1836,8 +1842,12 @@
   // hashed one-time code, gets an authorization code back on this same
   // URL, and trades it for tokens with the unhashed code. Tokens live in
   // localStorage; the refresh token renews them silently. Development Mode
-  // (verified 2026-11-04) refuses to create a playlist but fills one the
-  // user owns, so Save asks for an existing playlist to put the songs in.
+  // (retested 2026-11-04) creates a playlist through POST /me/playlists
+  // and fills one the user owns; only the older /users/{id}/playlists
+  // route is refused. So Save offers a new private playlist or one of the
+  // viewer's own. Who can sign in at all is the app's user list in the
+  // Spotify dashboard (five accounts in Development Mode): anyone else gets
+  // a 403 at login, which is why Copy links stays beside Save for everyone.
   const SP_TOKEN = 'musictree-spotify', SP_VERIFIER = 'musictree-verifier', SP_USED = 'musictree-used';
   const SCOPES = 'playlist-read-private playlist-modify-private playlist-modify-public';
   const redirectUri = () => location.origin + location.pathname.replace(/index\.html$/, '');
@@ -1879,10 +1889,11 @@
     if (Date.now() > t.exp) t = await tokenRequest({ grant_type: 'refresh_token', refresh_token: t.refresh });
     const r = await fetch('https://api.spotify.com/v1/' + path, { ...opts, headers: { Authorization: 'Bearer ' + t.access, 'Content-Type': 'application/json', ...(opts.headers || {}) } });
     if (r.status === 401) { localStorage.removeItem(SP_TOKEN); throw new Error('signed out by Spotify; sign in again'); }
-    if (!r.ok) throw new Error(`${r.status} on ${path.split('?')[0]}` + (r.status === 403 ? ' (Development Mode or scope)' : ''));
+    if (!r.ok) throw new Error(`${r.status} on ${path.split('?')[0]}` + (r.status === 403 ? ' (this Spotify account is not on the app\'s list; use Copy links)' : ''));
     return r.status === 204 ? null : r.json();
   }
   const saver = document.getElementById('saver'), target = document.getElementById('target');
+  const NEW_PLAYLIST = '__new__', DEFAULT_NAME = 'Mixtape: Music Tree';
   async function openSaver() {
     if (!spotifyId) { trayMsg.textContent = 'no spotify.json beside the page: run deploy'; return; }
     if (!build.list.length) { trayMsg.textContent = 'build a list first'; return; }
@@ -1892,27 +1903,36 @@
       const me = (await spotifyFetch('me')).id;
       const mine = [];
       for (let url = 'me/playlists?limit=50'; url;) { const page = await spotifyFetch(url); mine.push(...page.items.filter(p => p.owner.id === me)); url = page.next ? page.next.replace('https://api.spotify.com/v1/', '') : null; }
-      if (!mine.length) { trayMsg.textContent = 'you own no playlists yet: make an empty private one in Spotify, then try again'; return; }
-      d3.select(target).selectAll('option').data(mine, p => p.id).join('option').attr('value', p => p.id).text(p => `${p.name}${p.public ? ' (public)' : ''} · ${p.tracks?.total ?? ''}`);
+      // A new private playlist leads the list; the viewer's own follow.
+      const choices = [{ id: NEW_PLAYLIST, name: '+ new private playlist', tracks: null }, ...mine];
+      d3.select(target).selectAll('option').data(choices, p => p.id).join('option').attr('value', p => p.id).text(p => p.id === NEW_PLAYLIST ? p.name : `${p.name}${p.public ? ' (public)' : ''} · ${p.tracks?.total ?? ''}`);
       saver.hidden = false;
-      trayMsg.textContent = 'Spotify blocks making a playlist from here, so pick one of yours (an empty private one is the usual choice)';
+      trayMsg.textContent = 'make a new private playlist, or pick one of yours to add to or replace';
     } catch (e) { trayMsg.textContent = 'Spotify: ' + e.message; }
   }
   async function saveTo(replace) {
-    const id = target.value, uris = build.list.map(t => t.uri), name = document.getElementById('plname').value.trim();
+    let id = target.value, label = target.selectedOptions[0].text.split(' · ')[0];
+    const uris = build.list.map(t => t.uri), name = document.getElementById('plname').value.trim();
     if (!id || !uris.length) return;
     trayMsg.textContent = 'saving…';
     try {
+      if (id === NEW_PLAYLIST) {
+        // POST /me/playlists is the route Development Mode still allows
+        // (the per-user route 403s). Private, named from the box or the
+        // default; the rename step below is then moot.
+        const made = await spotifyFetch('me/playlists', { method: 'POST', body: JSON.stringify({ name: name || DEFAULT_NAME, public: false, description: 'built on Mixtape: Music Tree' }) });
+        id = made.id; label = made.name; replace = false;
+      }
       for (let i = 0; i < uris.length; i += 100) {
         const method = replace && i === 0 ? 'PUT' : 'POST';
         await spotifyFetch(`playlists/${id}/items`, { method, body: JSON.stringify({ uris: uris.slice(i, i + 100) }) });
       }
       let renamed = '';
-      if (name) { try { await spotifyFetch(`playlists/${id}`, { method: 'PUT', body: JSON.stringify({ name }) }); renamed = `, renamed to “${name}”`; } catch (e) { renamed = ' (renaming was refused; do it in Spotify)'; } }
+      if (name && name !== label) { try { await spotifyFetch(`playlists/${id}`, { method: 'PUT', body: JSON.stringify({ name }) }); renamed = `, renamed to “${name}”`; } catch (e) { renamed = ' (renaming was refused; do it in Spotify)'; } }
       // Remember what went out, so the next build skips it like the ledger does.
       const used = new Set(JSON.parse(localStorage.getItem(SP_USED) || '[]')); uris.forEach(u => used.add(u));
       localStorage.setItem(SP_USED, JSON.stringify([...used]));
-      trayMsg.textContent = `${uris.length} songs ${replace ? 'now make up' : 'added to'} “${target.selectedOptions[0].text.split(' · ')[0]}”${renamed}`;
+      trayMsg.textContent = `${uris.length} songs ${replace ? 'now make up' : 'added to'} “${label}”${renamed}`;
       saver.hidden = true;
     } catch (e) { trayMsg.textContent = 'Spotify: ' + e.message; }
   }
@@ -1928,7 +1948,7 @@
     <p>1. Seed it: tap a song in an open artist's ladder, the <b>+</b> beside an artist, or a genre chip in the legend. Mix them. Seeds show as chips at the bottom; tap a chip to drop it.</p>
     <p>2. Set the dials: whose songs, songs you play or new to you, mellow or up, how many.</p>
     <p>3. <b>Build</b>. The list grows outward from the seeds. Tap a row to drop it; Build again to refill.</p>
-    <p>4. <b>Copy links</b> to paste into a playlist in the Spotify desktop app, or <b>Save to Spotify</b>: sign in once, press Save again, pick one of your own playlists, Add or Replace. Spotify won't let the page create a playlist, so keep an empty one as an inbox.</p>
+    <p>4. <b>Copy links</b> works for everyone: paste them into a playlist in the Spotify desktop app. <b>Save to Spotify</b> works only for the few Spotify accounts listed on this app (Spotify caps a private app at five); if yours is listed, sign in once, press Save again, then make a new private playlist or pick one of your own to add to or replace.</p>
     <h3>Views</h3>
     <p>Mind map, Radial, Bubbles, Genres: one person's tree four ways. River: hours by genre over the years; stacked and merged show both people. Energy: chill to charged, measured from the sound. Two of us, Past, Moments: the two histories against each other. Diary, Marquee, Wrapped: Spotify's own records.</p>`;
   function toggleHelp(open = helpCard.hidden) {
@@ -1961,6 +1981,16 @@
   // energy dials at the vibe, and builds, so a mood is one tap.
   function applyVibe(v) {
     seeds.length = 0; seedIds.clear();
+    // A hand-made vibe carries its own songs in order, each with its line;
+    // the tray shows exactly that list instead of building one.
+    if (v.tracks) {
+      for (const name of v.seeds) { const a = treeIndex.map(ix => ix.get(name)).find(Boolean); if (a) seedIds.add(a.id); }
+      build.list = v.tracks.map(t => ({ name: t.name, artist: t.artist, uri: t.uri, reason: t.reason }));
+      trayMsg.textContent = v.blurb || v.name;
+      syncTray(); draw(true);
+      tray.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return;
+    }
     for (const name of v.seeds) {
       const a = treeIndex.map(ix => ix.get(name)).find(Boolean);
       if (!a) continue;
@@ -1975,9 +2005,9 @@
   if (vibes) {
     const [A, B] = vibes.people;
     document.getElementById('viberow').hidden = false;
-    d3.select('#vibes').selectAll('button').data(vibes.vibes, v => v.key).join('button').attr('class', 'vibe')
-      .attr('title', v => `${v.blurb ? v.blurb + ' · ' : ''}${v.who === 'both' ? 'both of you' : v.who} · ${v.tags.slice(0, 3).join(', ')}`)
-      .html(v => `${v.name}<i style="--a:${Math.round(100 * (v.hours[A] || 0) / (((v.hours[A] || 0) + (v.hours[B] || 0)) || 1))}%"></i>`)
+    d3.select('#vibes').selectAll('button').data(vibes.vibes, v => v.key).join('button').attr('class', v => v.special ? 'vibe special' : 'vibe')
+      .attr('title', v => v.special ? v.blurb : `${v.blurb ? v.blurb + ' · ' : ''}${v.who === 'both' ? 'both of you' : v.who} · ${v.tags.slice(0, 3).join(', ')}`)
+      .html(v => { const bar = `<i style="--a:${Math.round(100 * (v.hours[A] || 0) / (((v.hours[A] || 0) + (v.hours[B] || 0)) || 1))}%"></i>`; return v.special ? `<span>${v.name}${bar}</span>` : `${v.name}${bar}`; })
       .on('click', (e, v) => applyVibe(v));
   }
 
