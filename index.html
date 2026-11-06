@@ -281,15 +281,10 @@
   #trayhint { font-size: 12px; }
   #result { columns: 1; padding-left: 20px; line-height: 1.35; }
   #result li { padding: 1px 0; }
-  /* Vibes: a short vertical list; more/less shows the rest. */
+  /* Vibes: chips flow left to right and wrap, all of them visible, each
+     with its who-bar underneath (Chris, 2026-11-06). */
   #viberow { align-items: flex-start; }
-  #tray #vibes { display: flex; flex-direction: column; flex-wrap: nowrap; gap: 3px; max-height: 150px; overflow: hidden; flex: 1; margin: 0; }
-  #viberow.open #vibes { max-height: none; }
-  #tray .vibe { flex-direction: row; align-items: center; gap: 8px; padding: 3px 8px; border-radius: 6px; }
-  #tray .vibe i { width: 56px; margin-left: auto; flex: none; }
-  #tray .vibe.special { padding: 2px; } #tray .vibe.special > span { display: flex; align-items: center; gap: 8px; padding: 2px 8px; border-radius: 4px; }
-  #tray .vibe.special > span i { width: 56px; margin-left: auto; }
-  #vibemore { align-self: flex-end; }
+  #tray #vibes { display: flex; flex-wrap: wrap; gap: 5px; margin: 0; flex: 1; }
   /* Save status: in the save row, beside sign out. */
   #savestatus { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
   #savestatus i { width: 16px; height: 16px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-style: normal; font-size: 11px; font-weight: 700; }
@@ -672,7 +667,10 @@
   const textPos = () => { const v = state.textBy[state.view]; return typeof v === 'number' ? v : ({ s: 0, m: 1, l: 2 })[v] ?? 1; };   // old 's'/'m'/'l' values still read
   const textFactor = () => { const t = textPos(), i = Math.min(3, Math.floor(t)), f = t - i; return (TEXT_BASE[state.view] || 1) * (TEXT_STOPS[i] + (TEXT_STOPS[i + 1] - TEXT_STOPS[i]) * f); };
   const textSlider = document.getElementById('textsize'), textOut = document.getElementById('textout');
-  const setText = v => { state.textBy[state.view] = v; remember(); syncText(); draw(true); };
+  // The spacing grows with the text (rows, columns, ladders), so the view
+  // re-fits after a change: at the same zoom a wider layout looked like
+  // zooming in (Chris, 2026-11-06).
+  const setText = v => { state.textBy[state.view] = v; remember(); syncText(); draw(); };
   textSlider.addEventListener('input', () => { let v = +textSlider.value; const near = Math.round(v); if (Math.abs(v - near) < 1 / 6) v = near; textSlider.value = v; setText(v); });
   document.querySelectorAll('#textstops button').forEach(b => b.addEventListener('click', () => setText(+b.dataset.stop)));
   const syncText = () => { const t = textPos(); textSlider.value = t; textOut.textContent = Number.isInteger(t) ? TEXT_NAMES[t] : `${TEXT_NAMES[Math.floor(t)]}+`;
@@ -2300,9 +2298,6 @@
   if (vibes) {
     const [A, B] = vibes.people;
     document.getElementById('viberow').hidden = false;
-    const more = document.createElement('button'); more.type = 'button'; more.id = 'vibemore'; more.className = 'mini'; more.textContent = 'more';
-    more.addEventListener('click', () => { const open = document.getElementById('viberow').classList.toggle('open'); more.textContent = open ? 'less' : 'more'; });
-    document.getElementById('viberow').appendChild(more);
     d3.select('#vibes').selectAll('button').data(vibes.vibes, v => v.key).join('button').attr('class', v => v.special ? 'vibe special' : 'vibe')
       .attr('title', v => v.special ? v.blurb : `${v.blurb ? v.blurb + ' · ' : ''}${v.who === 'both' ? 'both of you' : v.who} · ${v.tags.slice(0, 3).join(', ')}`)
       .html(v => { const bar = `<i style="--a:${Math.round(100 * (v.hours[A] || 0) / (((v.hours[A] || 0) + (v.hours[B] || 0)) || 1))}%"></i>`; return v.special ? `<span>${v.name}${bar}</span>` : `${v.name}${bar}`; })
