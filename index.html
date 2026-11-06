@@ -294,6 +294,12 @@
   #savestatus.ok { color: #7ad48e; } #savestatus.ok i { background: #2a6b3b; color: #c8f5d2; }
   #savestatus.err { color: #ff8aa8; } #savestatus.err i { background: #6b2a3b; color: #ffd0da; }
   #saver { align-items: center; }
+  /* The save log: the last result on its own line, which stays after the
+     save row closes (Chris could not find it, 2026-11-06), and a history
+     of earlier ones behind a button. */
+  #savelog { align-items: center; }
+  #savehistory { flex-basis: 100%; margin: 4px 0 0; padding: 0 0 0 18px; color: var(--muted); font-size: 12px; }
+  #savehistory li i { font-style: normal; margin-right: 4px; }
   @media (max-width: 899px) {
     #menubtn { display: inline-block; }
     #viewname { display: none; }
@@ -430,9 +436,9 @@
     <input id="plname" type="text" placeholder="name it (optional)" style="width:180px">
     <button type="button" id="saveadd" class="mini" title="Append the songs to the chosen playlist">Add songs</button>
     <button type="button" id="savereplace" class="mini" title="Replace everything in the chosen playlist">Replace it</button>
-    <span id="savestatus"></span>
     <button type="button" id="splogout" class="mini" title="Forget the Spotify login on this device">sign out</button>
   </div>
+  <div class="row" id="savelog" hidden><span id="savestatus"></span><button type="button" id="savehist" class="mini" title="Earlier saves on this device">history</button><ol id="savehistory" hidden></ol></div>
   <ol id="result"></ol>
   <textarea id="clip" hidden rows="3" style="width:100%"></textarea>
 </div>
@@ -2153,10 +2159,23 @@
   // a failure is visible on a phone and readable in devtools afterwards.
   const toast = document.getElementById('toast');
   let toastTimer = null;
-  const saveStatus = document.getElementById('savestatus');
+  const saveStatus = document.getElementById('savestatus'), saveLog = document.getElementById('savelog'), SAVE_LOG = 'musictree-savelog';
+  const readLog = () => { try { return JSON.parse(localStorage.getItem(SAVE_LOG) || '[]'); } catch (e) { return []; } };
+  function showLog() {
+    const log = readLog();
+    saveLog.hidden = !log.length;
+    if (!log.length) return;
+    const [last] = log;
+    saveStatus.className = last.err ? 'err' : 'ok'; saveStatus.innerHTML = `<i>${last.err ? '!' : '&#10003;'}</i>${last.msg} <small>${last.when}</small>`;
+    d3.select('#savehistory').selectAll('li').data(log.slice(1)).join('li').html(e => `<i style="color:${e.err ? '#ff8aa8' : '#7ad48e'}">${e.err ? '!' : '&#10003;'}</i>${e.when} · ${e.msg}`);
+    document.getElementById('savehist').hidden = log.length < 2;
+  }
+  document.getElementById('savehist').addEventListener('click', () => { const h = document.getElementById('savehistory'); h.hidden = !h.hidden; });
   function notice(msg, err = false) {
     trayMsg.textContent = msg;
-    saveStatus.className = err ? 'err' : 'ok'; saveStatus.innerHTML = `<i>${err ? '!' : '&#10003;'}</i>${msg}`;
+    const when = new Date().toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+    try { localStorage.setItem(SAVE_LOG, JSON.stringify([{ msg, err, when }, ...readLog()].slice(0, 10))); } catch (e) {}
+    showLog();
     toast.textContent = msg; toast.classList.toggle('err', err); toast.hidden = false;
     clearTimeout(toastTimer); toastTimer = setTimeout(() => { toast.hidden = true; }, err ? 15000 : 7000);
     (err ? console.error : console.log)('[mixtape] ' + msg);
@@ -2279,7 +2298,7 @@
     if (v.tracks) {
       for (const name of v.seeds) { const a = treeIndex.map(ix => ix.get(name)).find(Boolean); if (a) seedIds.add(a.id); }
       build.list = v.tracks.map(t => ({ name: t.name, artist: t.artist, uri: t.uri, reason: t.reason }));
-      build.vibe = null; build.special = v.name.replace(/[✦\s]+/g, ' ').trim();
+      build.vibe = null; build.special = v.name.trim();     // stars and all: that is the title Chris wants on Spotify
       trayMsg.textContent = v.blurb || v.name;
       paneMode('playlist'); syncTray(); draw(true);
       return;
@@ -2404,7 +2423,7 @@
     if (keep) render(); else if (scrolls()) fitWidth(); else fit();
   }
   usePerson(+state.person || 0);
-  restoreTray();
+  restoreTray(); showLog();
   await spotifyCallback();
   draw();
 })();
