@@ -300,6 +300,7 @@
     <div class="seg" id="chill" role="group" aria-label="Energy"><button data-v="mellow">mellow</button><button data-v="any">any energy</button><button data-v="up">up</button></div>
     <div class="seg" id="len" role="group" aria-label="Length"><button data-v="20">20</button><button data-v="30">30</button><button data-v="60">60</button></div>
     <label><input type="checkbox" id="yearonly"> only <span></span></label>
+    <label id="nowordsl" title="only songs checked and found wordless; unchecked songs stay out"><input type="checkbox" id="nowords"> no words</label>
     <button type="button" id="buildbtn" class="mini">Build</button>
     <button type="button" id="copy" class="mini">Copy links</button>
     <button type="button" id="save" class="mini">Save to Spotify</button>
@@ -331,7 +332,7 @@
 <script>
 (async function () {
   // ---------- load ---------------------------------------------------------
-  let tree, tree2 = null, cmp = null, acct = null, picks = null, spotifyId = null, energy = null, vibes = null;
+  let tree, tree2 = null, cmp = null, acct = null, picks = null, spotifyId = null, energy = null, vibes = null, vocals = null;
 
   // ----- encrypted data (the deployed copy) --------------------------------
   // Locally the pipeline writes plain tree.json next to this file. On GitHub
@@ -428,6 +429,7 @@
     try { energy = await load('energy'); } catch (e) {}
     // vibes.json is the list of moods cut from both libraries (`vibes`).
     try { vibes = await load('vibes'); } catch (e) {}
+    try { vocals = await load('vocals'); } catch (e) {}   // which songs have words; the no-words filter needs it
     // spotify.json holds the app's client id (public by design) for the
     // Save button's login; `deploy` writes it. Missing means no Save.
     try { const r = await fetch('spotify.json', { cache: 'no-cache' }); if (r.ok) spotifyId = (await r.json()).client_id; } catch (e) {}
@@ -655,6 +657,14 @@
       }
     }
     if (state.overlay === 'on' && other() && RELEVANT.overlayctl.includes(state.view)) legend.append('span').html(`<i style="background:none;border:2px solid ${OTHER}"></i>${other().person}'s hours`);
+    // The vibe cards carry two marks nobody can guess from the card alone
+    // (Chris, 2026-11-05): the split bar is whose hours the vibe holds,
+    // and the strip below it is the vibe's artists laid out by energy.
+    if (state.view === 'vibes' && vibes) {
+      const [A, B] = vibes.people;
+      legend.append('span').html(`<span class="ramp" style="background:linear-gradient(90deg,${T.accent} 50%,${OTHER} 50%)"></span>bar: ${A}'s hours | ${B}'s`);
+      legend.append('span').html(`<i style="background:${T.muted}"></i>strip: one dot per artist, chill on the left, charged on the right, bigger = more hours`);
+    }
   }
   // Point every per-person lookup at one tree. Called once at start and
   // again from the person picker; the year scrubber resets because the
@@ -1398,7 +1408,7 @@
       addRect(x0, y0, CW, CH, { fill: T.surface, stroke: v.special ? T.sp[0] : T.line, strokeWidth: v.special ? 2.5 : 1, hit: { data: v.key,
         hover: e => tipAt(e, `<b>${v.name}</b><br>${v.artists.length} artists · ${v.who === 'both' ? 'both of you' : v.who} · ${v.tags.slice(0, 3).join(', ')}<br>tap to seed a playlist`), click: () => applyVibe(v) } });
       addLabel({ x: x0 + PAD, y: y0 + 18, text: v.name, base: 15, weight: 700, align: 'left', fitw: CW - 2 * PAD });
-      addLabel({ x: x0 + CW - PAD, y: y0 + 18, text: v.band, base: 11, color: T.muted, align: 'right' });
+      addLabel({ x: x0 + CW - PAD, y: y0 + 18, text: v.words === 'none' ? 'no words' : v.band, base: 11, color: T.muted, align: 'right' });
       // Who-bar.
       addRect(x0 + PAD, y0 + 30, (CW - 2 * PAD) * share, 4, { fill: T.accent });
       addRect(x0 + PAD + (CW - 2 * PAD) * share, y0 + 30, (CW - 2 * PAD) * (1 - share), 4, { fill: OTHER });
@@ -1407,6 +1417,9 @@
       // Energy strip: each artist a dot from chill to charged, sized by its hours.
       const sx = d3.scaleLinear().domain([0, 1]).range([x0 + PAD, x0 + CW - PAD]), maxH = d3.max(v.artists, a => d3.sum(Object.values(a.hours))) || 1;
       addLine(x0 + PAD, y0 + 72, x0 + CW - PAD, y0 + 72, { stroke: T.line });
+      // End caps so the strip reads without the legend open (phones hide it).
+      addLabel({ x: x0 + PAD, y: y0 + 62, text: 'chill', base: 9, color: T.muted, align: 'left' });
+      addLabel({ x: x0 + CW - PAD, y: y0 + 62, text: 'charged', base: 9, color: T.muted, align: 'right' });
       for (const a of v.artists) {
         const art = treeIndex.map(ix => ix.get(a.name)).find(Boolean), pnt = art ? paint(art) : { fill: famColor.get(v.family) || T.other, opacity: 1 };
         addCircle(sx(a.charge), y0 + 72, 2 + 6 * Math.sqrt(d3.sum(Object.values(a.hours)) / maxH), { fill: pnt.fill, fillOpacity: 0.85, hit: { data: a.name, hover: e => tipAt(e, `<b>${a.name}</b><br>charge ${a.charge.toFixed(2)}<br>` + Object.entries(a.hours).map(([p, h]) => `${p} ${h} h`).join(' · ')) } });
@@ -1814,7 +1827,7 @@
   const tray = document.getElementById('tray'), trayMsg = document.getElementById('traymsg');
   const seeds = [];                 // {kind, key, name, a?, uri?}
   const seedIds = new Set();        // artist ids among the seeds, for the ring
-  const build = { who: 'me', pool: 'played', len: '30', chill: 'any', list: [] };
+  const build = { who: 'me', pool: 'played', len: '30', chill: 'any', words: 'any', list: [] };
   const ME = () => tree.person || 'me', THEM = () => other()?.person || null;
   function addSeed(s) {
     if (seeds.some(x => x.key === s.key)) { trayMsg.textContent = `${s.name} is already a seed`; return; }
@@ -1832,6 +1845,13 @@
     return () => el.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === build[key]))); };
   const syncWho = dial('who', 'who'), syncPool = dial('pool', 'pool'), syncLen = dial('len', 'len'), syncChill = dial('chill', 'chill');
   const yearOnly = document.getElementById('yearonly');
+  // The no-words filter: only songs the vocals step judged wordless pass
+  // (a lyrics database, then a vocal separator on the preview). Songs it
+  // never checked stay out too, so the list is verified, not hopeful.
+  const noWords = document.getElementById('nowords');
+  noWords.addEventListener('change', () => { build.words = noWords.checked ? 'none' : 'any'; syncTray(); });
+  if (!vocals) document.getElementById('nowordsl').hidden = true;
+  const wordless = uri => vocals?.tracks[uri]?.w === 0;
   function syncTray() {
     const empty = !seeds.length && !build.list.length;
     document.getElementById('trayhint').hidden = !empty; document.getElementById('dials').hidden = empty; document.getElementById('trayclear').hidden = empty;
@@ -1842,7 +1862,7 @@
     document.getElementById('pool').hidden = !picks;
     document.getElementById('chill').hidden = !energy;
     yearOnly.parentElement.hidden = !state.year; yearOnly.nextElementSibling.textContent = state.year || '';
-    syncWho(); syncPool(); syncLen(); syncChill(); saveTray();
+    syncWho(); syncPool(); syncLen(); syncChill(); noWords.checked = build.words === 'none'; saveTray();
     d3.select('#result').selectAll('li').data(build.list, t => t.uri).join('li').attr('title', 'remove')
       .html(t => `<b>${t.name}</b> <span>${t.artist}</span><small>${t.reason}</small>`)
       .on('click', (e, t) => { build.list = build.list.filter(x => x.uri !== t.uri); syncTray(); });
@@ -1965,7 +1985,7 @@
     <p>Each view is one person's listening (the Person picker) or both. Circles are hours, colour is genre unless you change it, faded means long ago. Hover an artist to see who it goes with; tap it for its songs. Drag to pan, pinch or wheel to zoom, <b>whole</b> to see everything, <b>collapse</b> to condense the tree.</p>
     <h3>Making a playlist</h3>
     <p>1. Seed it: tap a song in an open artist's ladder, the <b>+</b> beside an artist, or a genre chip in the legend. Mix them. Seeds show as chips at the bottom; tap a chip to drop it.</p>
-    <p>2. Set the dials: whose songs, songs you play or new to you, mellow or up, how many.</p>
+    <p>2. Set the dials: whose songs, songs you play or new to you, mellow or up, how many. <b>No words</b> keeps only songs checked and found wordless (a lyrics database, then a listen for a voice), so it is strict: unchecked songs stay out.</p>
     <p>3. <b>Build</b>. The list grows outward from the seeds. Tap a row to drop it; Build again to refill.</p>
     <p>4. <b>Copy links</b> works for everyone: paste them into a playlist in the Spotify desktop app. <b>Save to Spotify</b> works only for the few Spotify accounts listed on this app (Spotify caps a private app at five); if yours is listed, sign in once, press Save again, then make a new private playlist or pick one of your own to add to or replace.</p>
     <h3>Views</h3>
@@ -1986,13 +2006,13 @@
   // are dropped on restore, since ids are per tree.
   const TRAY_KEY = 'musictree-tray';
   function saveTray() {
-    try { localStorage.setItem(TRAY_KEY, JSON.stringify({ seeds: seeds.map(s => ({ kind: s.kind, key: s.key, name: s.name, aid: s.a?.id, uri: s.uri })), list: build.list, who: build.who, pool: build.pool, len: build.len, chill: build.chill })); } catch (e) {}
+    try { localStorage.setItem(TRAY_KEY, JSON.stringify({ seeds: seeds.map(s => ({ kind: s.kind, key: s.key, name: s.name, aid: s.a?.id, uri: s.uri })), list: build.list, who: build.who, pool: build.pool, len: build.len, chill: build.chill, words: build.words })); } catch (e) {}
   }
   function restoreTray() {
     let t; try { t = JSON.parse(localStorage.getItem(TRAY_KEY) || 'null'); } catch (e) {}
     if (!t) return;
     for (const s of t.seeds || []) { const a = s.aid ? byId.get(s.aid) : null; if (s.aid && !a) continue; seeds.push({ ...s, a }); if (a) seedIds.add(a.id); }
-    build.list = t.list || []; build.who = t.who || build.who; build.pool = t.pool || build.pool; build.len = t.len || build.len; build.chill = t.chill || build.chill;
+    build.list = t.list || []; build.who = t.who || build.who; build.pool = t.pool || build.pool; build.len = t.len || build.len; build.chill = t.chill || build.chill; build.words = t.words || build.words;
   }
 
   // Vibe chips in the tray. Tapping one replaces the seeds with the vibe's
@@ -2018,6 +2038,7 @@
     build.who = v.who === 'both' ? 'both' : v.who === ME() ? 'me' : 'them';
     build.chill = v.band === 'mellow' ? 'mellow' : v.band === 'up' ? 'up' : 'any';
     build.pool = 'played';      // a mood starts from songs you play; "new to us" is one dial away
+    build.words = v.words === 'none' && vocals ? 'none' : 'any';   // focus vibes are wordless by definition
     trayMsg.textContent = `${v.name}: ${seeds.length} artists seeded`;
     syncTray(); draw(true); buildList();
   }
@@ -2057,6 +2078,7 @@
     const usedSet = new Set([...(picks?.used || []), ...JSON.parse(localStorage.getItem(SP_USED) || '[]')]), taken = new Set(), out = [];
     const push = (track, artist, reason) => {
       if (!track?.uri || usedSet.has(track.uri) || taken.has(track.uri)) return false;
+      if (build.words === 'none' && reason !== 'you picked it' && !wordless(track.uri)) return false;   // a song you tapped yourself always stays
       taken.add(track.uri); out.push({ name: track.name, artist, uri: track.uri, reason }); return true;
     };
     const me = ME(), them = THEM();
@@ -2097,7 +2119,7 @@
       live = live.filter(g => { if (out.length >= +build.len) return false; for (;;) { const n = g.next(); if (n.done) return false; if (push(...n.value)) return true; } });
     }
     build.list = out;
-    trayMsg.textContent = out.length < +build.len ? `${out.length} songs: the seeds ran out before ${build.len}` : `${out.length} songs`;
+    trayMsg.textContent = out.length < +build.len ? `${out.length} songs: the seeds ran out before ${build.len}${build.words === 'none' ? ' (no words keeps only checked songs)' : ''}` : `${out.length} songs`;
     syncTray();
   }
 
