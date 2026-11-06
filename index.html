@@ -284,7 +284,10 @@
   /* Vibes: chips flow left to right and wrap, all of them visible, each
      with its who-bar underneath (Chris, 2026-11-06). */
   #viberow { align-items: flex-start; }
-  #tray #vibes { display: flex; flex-wrap: wrap; gap: 5px; margin: 0; flex: 1; }
+  /* Two rows at rest, the rest behind "show more" (Chris, 2026-11-06). */
+  #tray #vibes { display: flex; flex-wrap: wrap; gap: 5px; margin: 0; flex: 1 1 100%; max-height: 70px; overflow: hidden; }
+  #viberow.open #vibes { max-height: none; }
+  #vibemore { white-space: nowrap; }
   /* Save status: in the save row, beside sign out. */
   #savestatus { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
   #savestatus i { width: 16px; height: 16px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-style: normal; font-size: 11px; font-weight: 700; }
@@ -2298,6 +2301,9 @@
   if (vibes) {
     const [A, B] = vibes.people;
     document.getElementById('viberow').hidden = false;
+    const more = document.createElement('button'); more.type = 'button'; more.id = 'vibemore'; more.className = 'mini'; more.textContent = 'show more';
+    more.addEventListener('click', () => { const open = document.getElementById('viberow').classList.toggle('open'); more.textContent = open ? 'show less' : 'show more'; });
+    document.getElementById('vibelabel').after(more);   // on the label's line; the chips take the full width below
     d3.select('#vibes').selectAll('button').data(vibes.vibes, v => v.key).join('button').attr('class', v => v.special ? 'vibe special' : 'vibe')
       .attr('title', v => v.special ? v.blurb : `${v.blurb ? v.blurb + ' · ' : ''}${v.who === 'both' ? 'both of you' : v.who} · ${v.tags.slice(0, 3).join(', ')}`)
       .html(v => { const bar = `<i style="--a:${Math.round(100 * (v.hours[A] || 0) / (((v.hours[A] || 0) + (v.hours[B] || 0)) || 1))}%"></i>`; return v.special ? `<span>${v.name}${bar}</span>` : `${v.name}${bar}`; })
