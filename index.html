@@ -213,6 +213,14 @@
   #result li span { color: var(--muted); }
   #result li small { display: block; color: var(--muted); font-size: 11px; }
   #legend .chip { cursor: pointer; }
+  /* A notice for things the tray's status text is too small to carry on a
+     phone: Spotify save results and sign-in outcomes (Chris missed a failed
+     Add songs entirely, 2026-11-05). Fixed at the bottom, above the sheet. */
+  #toast { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 60; max-width: min(92vw, 520px);
+    background: var(--surface); color: var(--fg); border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 10px;
+    padding: 10px 14px; font-size: 14px; box-shadow: 0 6px 24px rgba(0,0,0,.35); }
+  #toast.err { border-left-color: #ff5fa2; }
+  #toast[hidden] { display: none; }
   #panel .song { cursor: pointer; }
   @media (max-width: 700px) { #result { columns: 1; } }
 </style>
@@ -292,6 +300,7 @@
 </div>
 <div id="tip"></div>
 <div id="tray">
+  <div id="toast" role="status" hidden></div>
   <div class="row"><b>Playlist</b><span id="trayhint">tap a song in an open artist's ladder, the + beside the artist, or a genre chip in the legend, then Build</span><span id="seeds" class="row"></span><span id="traymsg"></span><button type="button" id="trayclear" class="mini">clear</button></div>
   <div class="row" id="viberow" hidden><span id="vibelabel">Vibes</span><span id="vibes" class="row"></span></div>
   <div class="row" id="dials">
@@ -1918,19 +1927,35 @@
     const verifier = localStorage.getItem(SP_VERIFIER);
     history.replaceState(null, '', location.pathname + '#' + (q.get('state') || 'mindmap'));
     if (!verifier) return;
-    try { await tokenRequest({ grant_type: 'authorization_code', code, redirect_uri: redirectUri(), code_verifier: verifier }); trayMsg.textContent = 'signed in to Spotify'; }
-    catch (e) { trayMsg.textContent = 'Spotify sign-in failed: ' + e.message; }
+    try { await tokenRequest({ grant_type: 'authorization_code', code, redirect_uri: redirectUri(), code_verifier: verifier }); notice('signed in to Spotify'); }
+    catch (e) { notice('Spotify sign-in failed: ' + e.message, true); }
     localStorage.removeItem(SP_VERIFIER);
   }
   async function spotifyFetch(path, opts = {}) {
     let t = spToken();
     if (!t) throw new Error('not signed in');
-    if (Date.now() > t.exp) t = await tokenRequest({ grant_type: 'refresh_token', refresh_token: t.refresh });
+    if (Date.now() > t.exp) {
+      // A refused refresh (rotated or revoked token) must not wedge the page
+      // on a dead token: drop it so the next Save goes through sign-in.
+      try { t = await tokenRequest({ grant_type: 'refresh_token', refresh_token: t.refresh }); }
+      catch (e) { localStorage.removeItem(SP_TOKEN); throw new Error('Spotify session expired; press Save to Spotify again to sign in'); }
+    }
     const r = await fetch('https://api.spotify.com/v1/' + path, { ...opts, headers: { Authorization: 'Bearer ' + t.access, 'Content-Type': 'application/json', ...(opts.headers || {}) } });
     if (r.status === 401) { localStorage.removeItem(SP_TOKEN); throw new Error('signed out by Spotify; sign in again'); }
     if (!r.ok) throw new Error(`${r.status} on ${path.split('?')[0]}` + (r.status === 403 ? ' (this Spotify account is not on the app\'s list; use Copy links)' : ''));
     return r.status === 204 ? null : r.json();
   }
+  // notice(): the tray status plus the bottom notice, and the console, so
+  // a failure is visible on a phone and readable in devtools afterwards.
+  const toast = document.getElementById('toast');
+  let toastTimer = null;
+  function notice(msg, err = false) {
+    trayMsg.textContent = msg;
+    toast.textContent = msg; toast.classList.toggle('err', err); toast.hidden = false;
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => { toast.hidden = true; }, err ? 15000 : 7000);
+    (err ? console.error : console.log)('[mixtape] ' + msg);
+  }
+  toast.addEventListener('click', () => { toast.hidden = true; });
   const saver = document.getElementById('saver'), target = document.getElementById('target');
   const NEW_PLAYLIST = '__new__', DEFAULT_NAME = 'Mixtape: Music Tree';
   async function openSaver() {
@@ -1947,7 +1972,7 @@
       d3.select(target).selectAll('option').data(choices, p => p.id).join('option').attr('value', p => p.id).text(p => p.id === NEW_PLAYLIST ? p.name : `${p.name}${p.public ? ' (public)' : ''} · ${p.tracks?.total ?? ''}`);
       saver.hidden = false;
       trayMsg.textContent = 'make a new private playlist, or pick one of yours to add to or replace';
-    } catch (e) { trayMsg.textContent = 'Spotify: ' + e.message; }
+    } catch (e) { notice('Spotify: ' + e.message, true); }
   }
   async function saveTo(replace) {
     let id = target.value, label = target.selectedOptions[0].text.split(' · ')[0];
@@ -1971,9 +1996,9 @@
       // Remember what went out, so the next build skips it like the ledger does.
       const used = new Set(JSON.parse(localStorage.getItem(SP_USED) || '[]')); uris.forEach(u => used.add(u));
       localStorage.setItem(SP_USED, JSON.stringify([...used]));
-      trayMsg.textContent = `${uris.length} songs ${replace ? 'now make up' : 'added to'} “${label}”${renamed}`;
+      notice(`${uris.length} songs ${replace ? 'now make up' : 'added to'} “${label}”${renamed}`);
       saver.hidden = true;
-    } catch (e) { trayMsg.textContent = 'Spotify: ' + e.message; }
+    } catch (e) { notice('Spotify: ' + e.message, true); }
   }
   document.getElementById('save').addEventListener('click', openSaver);
   // The help popover: the page's instructions, anchored under the i.
