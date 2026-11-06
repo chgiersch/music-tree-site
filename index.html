@@ -2001,6 +2001,13 @@
     } catch (e) { notice('Spotify: ' + e.message, true); }
   }
   document.getElementById('save').addEventListener('click', openSaver);
+  // The three buttons inside the save panel. These lines were lost in the
+  // help-popover commit of 2026-11-04 (91d1fc5) and the panel sat dead for
+  // a day: it opened, and Add songs did nothing. Keep them next to the
+  // Save button's own handler so the next edit around here sees them.
+  document.getElementById('saveadd').addEventListener('click', () => saveTo(false));
+  document.getElementById('savereplace').addEventListener('click', () => saveTo(true));
+  document.getElementById('splogout').addEventListener('click', () => { localStorage.removeItem(SP_TOKEN); saver.hidden = true; notice('Spotify login forgotten on this device'); });
   // The help popover: the page's instructions, anchored under the i.
   // Fixed-positioned from the button's rectangle, because the bar's rows
   // scroll sideways and would clip an absolutely positioned child.
